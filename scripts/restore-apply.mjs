@@ -3,7 +3,8 @@
 //
 // Restores a decrypted Stage 1 set into a NEW, empty Supabase project (never
 // in place). Before touching any database it checks the set folder against
-// its manifest and the PostgreSQL client tools (psql and pg_restore 17 or
+// its manifest (the worker's COMPLETE marker certifying that manifest, then
+// every file; review round 3, P1-2) and the PostgreSQL client tools (psql and pg_restore 17 or
 // later). It prompts for the copy's connection string at a hidden prompt,
 // refuses a database that already holds Eden, then runs the restore steps in
 // order, each stopping on its first error, and stops at the first failed

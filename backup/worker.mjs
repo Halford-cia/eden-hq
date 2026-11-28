@@ -25,6 +25,7 @@ import { writeFileSync } from 'node:fs';
 import pg from 'pg';
 import {
   setTimestamp, setObjectNames, snapshotFacts, buildManifest, edenRolesOnly, statusRecord, closeSuperseded, dumpCommands,
+  completeMarker,
 } from './lib.mjs';
 import { uploadObject, readObject } from './gcs.mjs';
 
@@ -142,7 +143,8 @@ async function main() {
     await uploadObject(backupBucket, names.manifest, encManifest);
     fileCount += 1;
     encryptedBytes += encManifest.length;
-    await uploadObject(backupBucket, names.complete, Buffer.from('complete\n'));
+    // The last object: it certifies exactly this manifest (review round 3, P1-2).
+    await uploadObject(backupBucket, names.complete, completeMarker(manifest));
 
     const status = statusRecord({
       startedAt: startedAt.toISOString(), finishedAt: new Date().toISOString(), state: 'complete',

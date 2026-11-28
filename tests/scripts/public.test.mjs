@@ -281,7 +281,7 @@ describe('check:public reviews the outgoing revision range', () => {
   });
 
   // Review round 2, P1-1: the agent's token cannot push a workflow file, so
-  // Hank moves the template into .github/workflows/ (SETUP.md step 7.1).
+  // Hank moves the template into .github/workflows/ (SETUP.md, "Before setup").
   // Before and after the move there is exactly one CI definition.
   const activeCi = join(repoRoot, '.github', 'workflows', 'ci.yml');
   const templateCi = join(repoRoot, 'docs', 'ci', 'github-actions-ci.yml');

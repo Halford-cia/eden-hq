@@ -19,7 +19,7 @@ import {
   freshDb, emptyProject, seedCast, asUser, asAdmin, rpc, MIGRATOR, reopenAs, repoRoot, migrationFiles,
 } from '../db/harness.mjs';
 import {
-  dumpCommands, edenRolesOnly, snapshotFacts, buildManifest,
+  dumpCommands, edenRolesOnly, snapshotFacts, buildManifest, completeMarker,
 } from '../../backup/lib.mjs';
 
 const HOST = '127.0.0.1';
@@ -111,7 +111,10 @@ beforeAll(async () => {
   }
   const facts = await snapshotFacts(source);
   manifest = buildManifest({ stage: 1, facts, files });
-  writeFileSync(join(setDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  const manifestBuf = Buffer.from(JSON.stringify(manifest, null, 2));
+  writeFileSync(join(setDir, 'manifest.json'), manifestBuf);
+  // The worker's last object, copied into the decrypted folder (SETUP.md 11.4).
+  writeFileSync(join(setDir, 'COMPLETE'), completeMarker(manifestBuf));
 }, 240_000);
 
 afterAll(async () => {
@@ -231,6 +234,33 @@ describe('clean restore with the native tools, as a non-superuser', () => {
     expect((await target.query(`select count(*)::int as n from pg_namespace where nspname = 'eden'`)).rows[0].n).toBe(0);
     expect((await target.query('select count(*)::int as n from auth.users')).rows[0].n).toBe(1);
     await target.close();
+  });
+
+  // Review round 3, P1-2: every file present and intact, but the worker never
+  // wrote COMPLETE (its last upload failed). Neither script reaches a database.
+  it('refuses a set without its COMPLETE marker before connecting to anything', async () => {
+    if (!tools) return;
+    const unmarked = mkdtempSync(join(tmpdir(), 'eden-set-'));
+    for (const name of ['manifest.json', ...manifest.files.map((f) => f.name)]) {
+      writeFileSync(join(unmarked, name), readFileSync(join(setDir, name)));
+    }
+    const unused = 'postgresql://unused@127.0.0.1:1/none';
+    const a = await restoreApply(unmarked, unused);
+    const aout = `${a.stdout}${a.stderr}`;
+    expect(aout).toContain('FAIL  the set ends in its COMPLETE marker (the backup finished)');
+    expect(aout).toContain('Nothing was restored');
+    expect(aout).not.toContain('OK      ');
+    expect(a.code).toBe(1);
+    const v = await restoreVerify(unmarked, unused);
+    const vout = `${v.stdout}${v.stderr}`;
+    expect(vout).toContain('FAIL  the set ends in its COMPLETE marker (the backup finished)');
+    expect(vout).toContain('restore:verify FAILED');
+    expect(v.code).toBe(1);
+    // A marker certifying another manifest is refused the same way.
+    writeFileSync(join(unmarked, 'COMPLETE'), completeMarker(Buffer.from('{"SYNTHETIC":"other"}')));
+    const b = await restoreApply(unmarked, unused);
+    expect(`${b.stdout}${b.stderr}`).toContain('FAIL  the COMPLETE marker certifies this manifest');
+    expect(b.code).toBe(1);
   });
 
   it('refuses an incomplete set folder before connecting to anything', async () => {

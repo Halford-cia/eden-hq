@@ -24,7 +24,8 @@
     "access:close": "node scripts/access.mjs close",
     "restore:apply": "node scripts/restore-apply.mjs",
     "restore:verify": "node scripts/restore-verify.mjs",
-    "inventory:print": "node scripts/inventory-print.mjs"
+    "inventory:print": "node scripts/inventory-print.mjs",
+    "realtime:check": "node scripts/realtime-check.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.119.2",

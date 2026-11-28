@@ -2,11 +2,58 @@
 
 Everything below is done by Hank, in his own accounts. Nothing here is automated, and no agent runs any of it. Keep every real value (project refs, keys, passwords, Google account addresses, the rosters, the project register) in the password manager, never in this repository, an issue or a PR. Placeholders look like `<this>`.
 
-The order matters, because each step uses only what earlier steps created: Supabase project → Auth settings → migrations, then the Data API settings → Google OAuth → Netlify → hosted checks → CI and local guard → connection strings → synthetic test accounts and the gate → backups → restore drill on synthetic data → real users → first real project.
+The order matters, because each step uses only what earlier steps created: the local guard, CI and a passing check, then merge the Stage 1 pull request → what you need, on `main` → Supabase project → Auth settings → migrations, then the Data API settings → Google OAuth → Netlify → hosted checks → connection strings → synthetic test accounts, the gate and the Realtime check → backups → restore drill on synthetic data → real users → first real project.
 
 Until step 12, the production project holds **synthetic data only**: six test Google accounts and invented projects. That is what lets the Stage 1 restore drill open its copy (the spec allows opening only copies that hold synthetic data).
 
 Spec of record: [SPEC.md](SPEC.md). Stage 1 notes and deviations: [STAGE1.md](STAGE1.md).
+
+## Before setup: the local guard, CI, then merge the Stage 1 pull request (#2)
+
+Until #2 is merged, `main` holds only `CLAUDE.md` and `docs/`: there is nothing to install or test there yet. Do this first, in your own clone of this repository (its `origin` is the main repository, so `gh` finds PR #2 there). Nothing is pushed until step 4, and by then the guard is on.
+
+1. Create your private deny-list outside the repository, one term per line (real addresses, family and staff names, property names, plan terms). Then in your shell profile, and in the open shell:
+
+   ```sh
+   export EDEN_DENYLIST_FILE="$HOME/<private folder>/eden-denylist.txt"
+   ```
+
+2. Check out the pull request and turn the guard on **before any push**:
+
+   ```sh
+   gh pr checkout 2
+   git config core.hooksPath .githooks
+   ```
+
+   Every `git push` from this clone then runs `check:public` with the deny-list over exactly the commits that push sends, whichever branch is checked out. Reports name the file, commit and rule, never the matched text; a file whose name holds a deny-listed term is shown as `<file name withheld: deny-listed term>`. The hook needs only Node (no `npm ci`). Do the same two things (the export and `core.hooksPath`) in every later clone, before its first push.
+3. Activate CI on the pull request's branch. GitHub refuses workflow files from the agent's token (it has no `workflow` scope), so this one commit is yours:
+
+   ```sh
+   mkdir -p .github/workflows
+   git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml
+   git commit -m "Activate CI"
+   ```
+
+4. Push it. The hook runs first and must print no finding; a finding stops the push, and nothing has left your machine.
+
+   ```sh
+   git push
+   ```
+
+   The branch lives on the agent's fork; `gh pr checkout` pushes back to it while the PR allows maintainer edits. If GitHub shows **Approve and run** on the PR (a fork's first workflow run), approve it.
+5. Wait for the check, and confirm it ran on the head you pushed:
+
+   ```sh
+   gh pr checks 2 --watch
+   git rev-parse HEAD
+   gh pr view 2 --json headRefOid --jq .headRefOid
+   ```
+
+   The two SHAs must be equal, and `gh pr checks 2` must show `test` **pass**. CI runs every `check:public` rule except the deny-list over exactly the commits of the pull request or push (the event's base and head), all tests (it installs the PostgreSQL 17 client tools for the restore test) and a synthetic build with `check:dist`.
+6. Require the check: GitHub → Settings → Branches → add a protection rule for `main`: require a pull request before merging, and require the status check `test` to pass (search for it by name; it exists once step 5 has run). From then on `main` takes no change whose head has not passed.
+7. Merge #2 only while `gh pr checks 2` shows `test` passing on the PR's current head. If anyone pushes to the branch after step 5, the check must pass again on the new head before you merge.
+
+Then continue at step 0, on `main`.
 
 ## 0. What you need
 
@@ -26,7 +73,7 @@ Spec of record: [SPEC.md](SPEC.md). Stage 1 notes and deviations: [STAGE1.md](ST
 
   `npm run restore:apply` checks the versions itself and refuses older tools.
 - Six Google accounts that hold nothing real, for the synthetic stage (step 9): for example new free accounts named `Eden Test 1` to `Eden Test 6`. Never a real person's account. Keep their sign-in details in the password manager.
-- A clean clone of this repository on `main`, then `npm ci`, then `npm test` (it needs the client tools above).
+- After the Stage 1 pull request is merged (the section above): a clean clone of this repository on `main`, with `EDEN_DENYLIST_FILE` set and `git config core.hooksPath .githooks` run in it, then `npm ci`, then `npm test` (it needs the client tools above).
 
 ## 1. Create the Supabase project
 
@@ -60,8 +107,10 @@ git switch main && git pull --ff-only
 npx supabase@2 login
 npx supabase@2 link --project-ref <ref>        # asks for the database password
 npx supabase@2 db push                          # applies supabase/migrations/ in filename order
-npx supabase@2 migration list                   # read-back: both Stage 1 migrations applied
+npx supabase@2 migration list                   # read-back: the four Stage 1 migrations applied
 ```
+
+The read-back must list exactly these four versions, local and remote alike: `20261127000100` (foundation), `20261127000200` (operations), `20261128000100` (recorded names) and `20261128000200` (a posted update returns its entry).
 
 `supabase/migrations/` is the only migration entry point. Then, in the dashboard:
 
@@ -113,28 +162,7 @@ Record pass/fail in your setup notes (private).
 
 ## 7. CI and the local public-repository guard
 
-1. **Before you merge the Stage 1 pull request (#2)**, activate CI on its branch from your own account. GitHub refuses workflow files from the agent's token (it has no `workflow` scope), so this one push is yours:
-
-   ```sh
-   gh pr checkout 2
-   mkdir -p .github/workflows
-   git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml
-   git commit -m "Activate CI"
-   git push
-   gh pr checks 2 --watch
-   ```
-
-   Run it in your clone of this repository (its `origin` is the main repository, so `gh` finds PR #2 there).
-
-   The branch lives on the agent's fork; `gh pr checkout` pushes back to it while the PR allows maintainer edits. If GitHub shows **Approve and run** on the PR (a fork's first workflow run), approve it. Merge only after the `ci` check has run on the PR's head and passed. CI runs every `check:public` rule except the deny-list over exactly the commits of the pull request or push (the event's base and head), all tests (it installs the PostgreSQL 17 client tools for the restore test) and a synthetic build with `check:dist`.
-2. Create your private deny-list outside the repository, one term per line (real addresses, family and staff names, property names, plan terms). Then in your shell profile:
-
-   ```sh
-   export EDEN_DENYLIST_FILE="$HOME/<private folder>/eden-denylist.txt"
-   ```
-
-3. Once per clone: `git config core.hooksPath .githooks`. Every `git push` then runs `check:public` with the deny-list over exactly the commits that push sends, whichever branch is checked out. Reports name the file, commit and rule, never the matched text; a file whose name holds a deny-listed term is shown as `<file name withheld: deny-listed term>`.
-4. Optional: GitHub → Settings → Branches → protect `main` (require the `ci` check and a PR).
+Done before setup (the first section): the deny-list and `core.hooksPath` before the first push, CI activated on the pull request, `test` passing on its head, and `main` protected to require it. Check that both still hold: `git config core.hooksPath` prints `.githooks` in this clone, `echo "$EDEN_DENYLIST_FILE"` names your private file, and GitHub → Settings → Branches lists the `main` rule requiring `test`.
 
 ## 8. Connection strings for the operator scripts
 
@@ -185,6 +213,23 @@ The migrations seed the two workspaces (time zone `America/Chicago`) and create 
    It asks for this project's connection string, and for every other register entry that is not `deleted` it asks for that project's connection string and refuses unless its gate **reads back closed**. An unreachable project, or deleted keys alone, are not enough (spec review P0-2). Then mark the project `serving` in the register.
 6. As Owner A on your phone, create a synthetic project and property (`SYNTHETIC Test build`, `SYNTHETIC Test cottage`) with a few tasks: one assigned to a member, one to an outside name, one to nobody. As the Manager, add an item to the property. These are what the drill restores.
 7. Check: Owner A sees both workspaces, the Manager only Stay Eden, the Helper only Home building. To close everything at once: `npm run access:close`.
+8. **Realtime acceptance check** (spec, Stage 1 acceptance, "Realtime"). It needs what steps 9.4 to 9.6 made: the memberships, the open gate and the two `SYNTHETIC` projects. The manager, a same-workspace member and a signed-out client each subscribe to Postgres changes on every Eden table; Owner A makes a synthetic change in each workspace; none of them may receive anything.
+   1. Open three private windows on the production site and sign in as **Owner A**, the **Manager** and the **Helper**, one per window. In each, open the browser console (View → Developer → JavaScript Console) and copy that window's access token:
+
+      ```js
+      copy(JSON.parse(localStorage.getItem(Object.keys(localStorage).find((k) => k.endsWith('-auth-token')))).access_token)
+      ```
+
+      Paste each into the prompt below when asked, never into a file, a note or a chat. Tokens expire within the hour.
+   2. Run, in your clone:
+
+      ```sh
+      npm run realtime:check
+      ```
+
+      It asks, at hidden prompts, for the project URL, the publishable key, then the three tokens (Owner A, Manager, Helper). It subscribes a signed-out client, the Manager and the Helper to every Eden table and schema, then, as Owner A, creates, updates, moves to Done and archives one `SYNTHETIC realtime check` item in a `SYNTHETIC` project of each workspace, and listens for 15 seconds.
+   3. The output must end in `realtime:check PASSED`: a `PASS` line for the synthetic changes in `home_building` and `stay_eden_ops`, and `0 changes delivered` for the signed-out client, the Manager and the Helper. Each line also shows how the subscriptions were answered (`subscribed` or `refused`); refused is expected while no Eden table is in the publication, and either way zero deliveries is the result that counts. Any `FAIL` line: `npm run access:close`, check Database → Publications → `supabase_realtime` lists no `eden` table, and do not continue.
+   4. Sign out in the three windows and close them. Record pass or fail in your setup notes (private). The archived check items stay in their projects, archived; the drill restores them like any other row.
 
 ## 10. Recovery: the hosted daily backup
 
@@ -315,14 +360,14 @@ The Stage 1 drill restores a set taken while production held only the step 9 tes
 *Restore, gate closed.*
 
 3. Create a new, isolated Supabase project `eden-hq-drill` in your organization (no Netlify site points at it). Add it to the register: `<drill ref>,<drill publishable key>,drill,closed`.
-4. Download the set (`gcloud storage cp -r gs://eden-hq-backups-<suffix>/sets/<timestamp> <private folder>`) and decrypt each file on your Mac into one folder outside the repository: `age -d -i <private key file> eden.dump.age > eden.dump`, and the same for `auth.dump`, `migrations.dump`, `roles.sql` and `manifest.json`.
+4. Download the set (`gcloud storage cp -r gs://eden-hq-backups-<suffix>/sets/<timestamp> <private folder>`) and decrypt each file on your Mac into one folder outside the repository: `age -d -i <private key file> eden.dump.age > eden.dump`, and the same for `auth.dump`, `migrations.dump`, `roles.sql` and `manifest.json`. Then copy the set's `COMPLETE` marker into that folder as it is (it is not encrypted): `cp <private folder>/<timestamp>/COMPLETE <decrypted set folder>/COMPLETE`. The worker writes it last, naming the manifest it certifies; `restore:apply` and `restore:verify` refuse a folder without it, or with a marker for a different manifest, before they connect to anything. A set with no `COMPLETE` was never finished: choose an earlier timestamp.
 5. Restore into the drill with its session-pooler string (step 8 form):
 
    ```sh
    npm run restore:apply -- <decrypted set folder>
    ```
 
-   It checks every file against the manifest (present, recorded size and hash) and the client tools (17 or later), refuses a database that already holds Eden, then runs each step (remove GraphQL, Eden roles, Auth rows, Eden schemas and rows, the membership helper's owner, the migration ledger) and **stops at the first error**. On a failure it names the step: delete the drill project and start again (rerun with `--show-errors` to see the tool's message on your terminal only). The access gate arrives **closed**: its data is never in a set.
+   It checks the `COMPLETE` marker against the manifest, every file against the manifest (present, recorded size and hash) and the client tools (17 or later), refuses a database that already holds Eden, then runs each step (remove GraphQL, Eden roles, Auth rows, Eden schemas and rows, the membership helper's owner, the migration ledger) and **stops at the first error**. On a failure it names the step: delete the drill project and start again (rerun with `--show-errors` to see the tool's message on your terminal only). The access gate arrives **closed**: its data is never in a set.
 6. Authentication → Users on the drill: sign out every user (sets hold no sessions, so there should be none).
 7. With the drill's string, and the expected-accounts file saved to a temporary file outside the repository:
 
@@ -330,7 +375,7 @@ The Stage 1 drill restores a set taken while production held only the step 9 tes
    npm run restore:verify -- <decrypted set folder> --expected-accounts <expected-accounts file>
    ```
 
-   Every line must read PASS: the set files, migrations, the table list, every row count, Auth counts, the closed gate, row-level security on every Eden table, the membership helper owned by its own role, the restored grants and policies, and **Auth users and identities are exactly the expected test accounts**. It prints names and counts only, never values. If that last line fails, the set holds someone who is not a test account: treat it as real data, stop after step 8 and never open the copy.
+   Every line must read PASS: the `COMPLETE` marker, the set files, migrations, the table list, every row count, Auth counts, the closed gate, row-level security on every Eden table, the membership helper owned by its own role, the restored grants and policies, and **Auth users and identities are exactly the expected test accounts**. It prints names and counts only, never values. If that last line fails, the set holds someone who is not a test account: treat it as real data, stop after step 8 and never open the copy.
 8. Confirm the gate holds (the positive closed-gate check): set the drill's Data API **Exposed schemas** to exactly `eden_api`, then run the step 6 `curl` checks with the drill's URL and publishable key (no rows, `eden` refused), and over the direct connection. The host, user and certificate go in the connection options, never the password: `-W` asks for it at a hidden prompt, so nothing secret reaches your shell history (step 8.5):
 
    ```sh

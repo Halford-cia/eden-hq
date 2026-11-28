@@ -8,7 +8,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { repoRoot } from '../db/harness.mjs';
+import { repoRoot, migrationFiles } from '../db/harness.mjs';
 
 const doc = readFileSync(join(repoRoot, 'docs', 'SETUP.md'), 'utf8');
 const sections = doc.split(/^## /m).slice(1).map((s) => ({ title: s.split('\n')[0], body: s }));
@@ -160,6 +160,102 @@ describe('docs/SETUP.md drill proves who is in the copy (review round 2, P1-2)',
     const s1 = drill.split(/\n2\. /)[0];
     expect(s1).not.toMatch(/roster:show[^.]*confirm only the six test accounts/);
     expect(s1).toMatch(/Authentication → Users/);
+  });
+});
+
+describe('docs/SETUP.md: the guard, CI and a passing check come before setup (review round 3, P1-1)', () => {
+  const titles = sections.map((s) => s.title);
+  const beforeIdx = titles.findIndex((t) => /^Before setup/.test(t));
+  const before = sections[beforeIdx]?.body || '';
+  const b = (s) => {
+    // `git push` means the typed command (a code-block line), not prose.
+    const k = s === 'git push' ? before.search(/^[ \t]*git push[ \t]*$/m) : before.indexOf(s);
+    if (k < 0) throw new Error(`the before-setup section does not contain ${s}`);
+    return k;
+  };
+
+  it('is the first section, ahead of step 0 and its npm ci on main', () => {
+    expect(beforeIdx).toBe(0);
+    expect(titles.findIndex((t) => /What you need/.test(t))).toBe(1);
+    expect(section(/What you need/).body).toMatch(/merged[\s\S]*npm ci/);
+    // Nothing in it installs or tests: main has no package.json until the merge.
+    const blocks = [...before.matchAll(/```(?:sh)?\n([\s\S]*?)```/g)].map((m) => m[1]).join('\n');
+    expect(blocks).not.toMatch(/^\s*npm /m);
+  });
+
+  it('sets the deny-list and the hook before the first push, then activates CI and pushes', () => {
+    expect(b('EDEN_DENYLIST_FILE')).toBeLessThan(b('git config core.hooksPath .githooks'));
+    expect(b('git config core.hooksPath .githooks')).toBeLessThan(b('git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml'));
+    expect(b('git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml')).toBeLessThan(b('git push'));
+    // No push command of any kind before the hook is on.
+    expect(before.slice(0, b('git config core.hooksPath .githooks'))).not.toMatch(/^[ \t]*git push/m);
+  });
+
+  it('requires a passing check on the pushed head, makes it required on main, and merges only then', () => {
+    expect(b('git push')).toBeLessThan(b('gh pr checks 2 --watch'));
+    expect(before).toContain('headRefOid');
+    expect(before).toContain('git rev-parse HEAD');
+    expect(b('gh pr checks 2 --watch')).toBeLessThan(b('require the status check `test`'));
+    expect(b('require the status check `test`')).toBeLessThan(b('Merge #2 only'));
+  });
+
+  it('names the check the workflow actually produces', () => {
+    const wf = readFileSync(join(repoRoot, 'docs', 'ci', 'github-actions-ci.yml'), 'utf8');
+    const job = wf.match(/^jobs:\n {2}([\w-]+):/m)?.[1];
+    expect(job).toBe('test');
+    expect(wf).not.toMatch(/^ {4}name:/m); // so the check run is named after the job id
+    expect(before).toContain(`\`${job}\` **pass**`);
+  });
+
+  it('step 7 no longer carries a first push or the activation', () => {
+    const s7 = section(/^7\. CI/).body;
+    expect(s7).not.toContain('git push');
+    expect(s7).not.toContain('gh pr checkout');
+  });
+});
+
+describe('docs/SETUP.md runs the hosted Realtime check after enrollment (review round 3, P1-5)', () => {
+  const s9 = section(/Synthetic test accounts/).body;
+  const k = (s) => {
+    const i = s9.indexOf(s);
+    if (i < 0) throw new Error(`step 9 does not contain ${s}`);
+    return i;
+  };
+
+  it('a runnable command, after the roster, the open gate and the synthetic projects', () => {
+    expect(k('npm run realtime:check')).toBeGreaterThan(k('npm run roster:apply -- <roster file>'));
+    expect(k('npm run realtime:check')).toBeGreaterThan(k('npm run access:open'));
+    expect(k('npm run realtime:check')).toBeGreaterThan(k('SYNTHETIC Test cottage'));
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+    expect(pkg.scripts['realtime:check']).toBe('node scripts/realtime-check.mjs');
+  });
+
+  it('covers the manager, a same-workspace member and a signed-out client, changes in both workspaces, zero deliveries', () => {
+    const step = s9.slice(k('Realtime acceptance check'));
+    for (const s of ['Manager', 'Helper', 'signed-out client', 'home_building', 'stay_eden_ops', '0 changes delivered', 'realtime:check PASSED']) {
+      expect(step).toContain(s);
+    }
+  });
+
+  it('the acceptance map points at it, not at the publication and HTTP checks alone', () => {
+    const stage = readFileSync(join(repoRoot, 'docs', 'STAGE1.md'), 'utf8');
+    const row = stage.split('\n').find((l) => l.startsWith('| Realtime'));
+    expect(row).toContain('npm run realtime:check');
+    expect(row).toContain('§9.8');
+    expect(row).not.toMatch(/§3, §6\)/);
+  });
+});
+
+describe('docs/SETUP.md read-backs match this head (review round 3, P1-2 and P2-3)', () => {
+  it('the migration read-back names every migration', () => {
+    for (const f of migrationFiles()) expect(doc).toContain(`\`${f.split('_')[0]}\``);
+    expect(doc).not.toContain('both Stage 1 migrations');
+  });
+
+  it('the drill carries the COMPLETE marker into the decrypted folder', () => {
+    const drill = section(/Restore drill/).body;
+    expect(drill).toContain('cp <private folder>/<timestamp>/COMPLETE <decrypted set folder>/COMPLETE');
+    expect(drill.indexOf('/COMPLETE <decrypted set folder>/COMPLETE')).toBeLessThan(drill.indexOf('npm run restore:apply --'));
   });
 });
 

@@ -4,7 +4,7 @@
 // scheduled-backup and restore-drill acceptance runs (docs/SETUP.md).
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -14,7 +14,7 @@ import {
 } from '../db/harness.mjs';
 import {
   setTimestamp, setObjectNames, snapshotFacts, buildManifest, verifyRestore, closeSuperseded,
-  watchVerdict, statusRecord, edenRolesOnly,
+  watchVerdict, statusRecord, edenRolesOnly, completeMarker,
 } from '../../backup/lib.mjs';
 
 let db;
@@ -92,7 +92,7 @@ describe('snapshot facts, manifest and restore:verify', () => {
     await db.query('reset role');
     const { dir, files } = setFolder();
     const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
-    writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
+    seal(dir, manifest);
 
     // A restored copy: same data, gate closed (the dump leaves its data out).
     await setGate(db, false);
@@ -128,6 +128,7 @@ describe('snapshot facts, manifest and restore:verify', () => {
     await db.query('reset role');
     const { dir, files } = setFolder();
     const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+    seal(dir, manifest);
     await db.query(`set role ${MIGRATOR}`);
     try {
       expect((await verifyRestore(db, manifest, { dir })).ok).toBe(true);
@@ -154,6 +155,60 @@ describe('snapshot facts, manifest and restore:verify', () => {
     }
   });
 
+  // Review round 3, P1-2: the worker uploads the manifest before COMPLETE. A
+  // set whose last upload failed has every file and a manifest, and no marker.
+  it('every file intact but no COMPLETE marker, or a marker for another manifest: FAIL by name', async () => {
+    await db.query(`set role ${MIGRATOR}`);
+    const facts = await snapshotFacts(db);
+    await db.query('reset role');
+    const { dir, files } = setFolder();
+    const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+    seal(dir, manifest);
+    await setGate(db, false);
+    await db.query(`set role ${MIGRATOR}`);
+    try {
+      const pass = await verifyRestore(db, manifest, { dir });
+      expect(pass.checks.filter((c) => !c.ok)).toEqual([]);
+      expect(pass.checks.map((c) => c.name)).toContain('the COMPLETE marker certifies this manifest');
+
+      rmSync(join(dir, 'COMPLETE'));
+      const missing = await verifyRestore(db, manifest, { dir });
+      expect(missing.ok).toBe(false);
+      expect(missing.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
+        'the set ends in its COMPLETE marker (the backup finished)',
+      ]);
+
+      // The old constant marker, and a marker for a different manifest.
+      for (const marker of [Buffer.from('complete\n'), completeMarker(Buffer.from('{"SYNTHETIC":"other manifest"}'))]) {
+        writeFileSync(join(dir, 'COMPLETE'), marker);
+        const wrong = await verifyRestore(db, manifest, { dir });
+        expect(wrong.ok).toBe(false);
+        expect(wrong.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
+          'the COMPLETE marker certifies this manifest',
+        ]);
+      }
+
+      // A manifest edited after the marker was written fails the same way.
+      writeFileSync(join(dir, 'COMPLETE'), completeMarker(Buffer.from(JSON.stringify(manifest, null, 2))));
+      writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ ...manifest, note: 'SYNTHETIC edit' }, null, 2));
+      const edited = await verifyRestore(db, manifest, { dir });
+      expect(edited.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
+        'the COMPLETE marker certifies this manifest',
+      ]);
+    } finally {
+      await db.query('reset role');
+    }
+  });
+
+  it('the worker writes the marker for the manifest it uploaded, as its last object', () => {
+    const src = readFileSync(join(repoRoot, 'backup', 'worker.mjs'), 'utf8');
+    const manifestUpload = src.indexOf('uploadObject(backupBucket, names.manifest');
+    const markerUpload = src.indexOf('uploadObject(backupBucket, names.complete, completeMarker(manifest))');
+    expect(manifestUpload).toBeGreaterThan(0);
+    expect(markerUpload).toBeGreaterThan(manifestUpload);
+    expect(src.indexOf('uploadObject(backupBucket', markerUpload + 1)).toBe(-1);
+  });
+
   it('restored RLS, helper ownership and grants are compared with the set', async () => {
     await db.query(`set role ${MIGRATOR}`);
     const facts = await snapshotFacts(db);
@@ -163,6 +218,7 @@ describe('snapshot facts, manifest and restore:verify', () => {
     ]);
     const { dir, files } = setFolder();
     const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+    seal(dir, manifest);
 
     const copy = await freshDb();
     await seedLike(copy);
@@ -204,6 +260,13 @@ describe('snapshot facts, manifest and restore:verify', () => {
 });
 
 // A decrypted set folder holding the four Stage 1 files (SYNTHETIC bytes).
+/** manifest.json and the COMPLETE marker the worker writes last, as decrypted. */
+function seal(dir, manifest) {
+  const buf = Buffer.from(JSON.stringify(manifest, null, 2));
+  writeFileSync(join(dir, 'manifest.json'), buf);
+  writeFileSync(join(dir, 'COMPLETE'), completeMarker(buf));
+}
+
 function setFolder() {
   const dir = mkdtempSync(join(tmpdir(), 'eden-set-'));
   const files = [];

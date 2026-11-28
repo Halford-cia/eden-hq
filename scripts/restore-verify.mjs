@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // npm run restore:verify -- <decrypted-set-directory>
-// Checks the set folder (every required file present, with its recorded size
-// and SHA-256), then compares a restored copy, over a direct database
+// Checks the set folder (the worker's COMPLETE marker certifying its
+// manifest, review round 3 P1-2; every required file present, with its
+// recorded size and SHA-256), then compares a restored copy, over a direct database
 // connection with the gate closed, against the set's manifest.json: applied
 // migrations, the complete table list, every table's row count, Auth row
 // counts, the closed gate, row-level security, the membership helper's owner,

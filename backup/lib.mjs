@@ -15,6 +15,19 @@ export const REQUIRED_FILES = {
   1: ['roles.sql', 'eden.dump', 'auth.dump', 'migrations.dump'],
 };
 
+/**
+ * The set's last object, `sets/<timestamp>/COMPLETE` (review round 3, P1-2).
+ * The worker writes it only after every file and the manifest are uploaded,
+ * so a set without it was never finished. It is not encrypted and names the
+ * SHA-256 of the plaintext manifest it certifies; restore:apply and
+ * restore:verify require it, matching manifest.json, in the decrypted folder.
+ */
+export const COMPLETE_FILE = 'COMPLETE';
+export function completeMarker(manifestBuf) {
+  const sha = createHash('sha256').update(manifestBuf).digest('hex');
+  return Buffer.from(`eden-backup-complete v1\nmanifest-sha256 ${sha}\n`);
+}
+
 const EDEN_SCHEMA = (r) => typeof r.schema === 'string' && r.schema.startsWith('eden');
 
 /**
@@ -207,7 +220,8 @@ export async function closeSuperseded(connectFn) {
 /**
  * The decrypted set folder against its manifest (review P1-2): the stage's
  * required files are listed, and every listed file is present with its
- * recorded size and SHA-256. Returns checks; names only, never values.
+ * recorded size and SHA-256, and the worker's COMPLETE marker certifies the
+ * manifest (review round 3, P1-2). Returns checks; names only, never values.
  */
 export function verifySetFiles(dir, manifest) {
   const checks = [];
@@ -215,6 +229,16 @@ export function verifySetFiles(dir, manifest) {
   if (!dir) {
     add('set folder checked', false);
     return checks;
+  }
+  // The worker's certificate that the set finished (review round 3, P1-2),
+  // bound to this folder's manifest.json byte for byte.
+  const markerPath = join(dir, COMPLETE_FILE);
+  if (!existsSync(markerPath)) {
+    add('the set ends in its COMPLETE marker (the backup finished)', false);
+  } else {
+    const manifestPath = join(dir, 'manifest.json');
+    add('the COMPLETE marker certifies this manifest',
+      existsSync(manifestPath) && readFileSync(markerPath).equals(completeMarker(readFileSync(manifestPath))));
   }
   const listed = Array.isArray(manifest.files) ? manifest.files : [];
   const required = REQUIRED_FILES[manifest.stage];

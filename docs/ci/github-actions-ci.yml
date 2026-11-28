@@ -1,5 +1,6 @@
-# Eden HQ CI. Hank moves this file to .github/workflows/ci.yml in a PR
-# (docs/SETUP.md, step 7): the agent's GitHub token cannot push workflow files.
+# Eden HQ CI. Hank moves this file to .github/workflows/ci.yml on the Stage 1
+# pull request before merging it (docs/SETUP.md, "Before setup"): the agent's
+# GitHub token cannot push workflow files. The check it produces is `test`.
 # Runs every check except the private deny-list, which runs locally before
 # each push (a pushed commit is already public).
 name: ci
