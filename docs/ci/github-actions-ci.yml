@@ -1,0 +1,51 @@
+# Eden HQ CI. Hank moves this file to .github/workflows/ci.yml on the Stage 1
+# pull request before merging it (docs/SETUP.md, "Before setup"): the agent's
+# GitHub token cannot push workflow files. The check it produces is `test`.
+# Runs every check except the private deny-list, which runs locally before
+# each push (a pushed commit is already public).
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # The range comes from the event, never from origin/main: on a push to
+      # main the checkout's origin/main already equals the new head, which
+      # would review nothing. A first push (all-zero before) reviews the
+      # head's whole history; an empty range fails.
+      - name: Public repository check (every commit in the event, no deny-list)
+        env:
+          EDEN_PUBLIC_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EDEN_PUBLIC_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: npm run check:public -- --ci
+      # The clean-restore acceptance test drives native pg_dump, pg_restore
+      # and psql 17 or later against a local database.
+      - name: PostgreSQL 17 client tools
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Database, front-end and script tests
+        run: npm test
+      - name: Synthetic production build and dist scan
+        env:
+          VITE_SUPABASE_URL: https://aaaaaaaaaaaaaaaaaaaa.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_SYNTHETIC_ci_only_000000
+          EDEN_DIST_MARKERS: SYNTHETIC_CI_MARKER
+          PRIVATE_MARKER_NOT_FOR_BROWSER: SYNTHETIC_CI_MARKER
+        run: npm run build && npm run check:dist
