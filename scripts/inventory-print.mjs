@@ -5,7 +5,7 @@
 // reviews every changed line in the diff, and commits it with the migration.
 
 import { freshDb } from '../tests/db/harness.mjs';
-import { collectInventory } from '../tests/db/inventory.mjs';
+import { collectInventory } from '../backup/inventory.mjs';
 
 const db = await freshDb();
 const inv = await collectInventory(db);

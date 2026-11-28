@@ -4,14 +4,18 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { freshDb, repoRoot } from './harness.mjs';
-import { collectInventory } from './inventory.mjs';
+import {
+  freshDb, emptyProject, migrationFiles, migrationsDir, stripSqlComments, repoRoot,
+} from './harness.mjs';
+import { collectInventory } from '../../backup/inventory.mjs';
 import expected from './inventory.expected.mjs';
 
 let inv;
+let graphqlDb;
 
 beforeAll(async () => {
   const db = await freshDb();
+  graphqlDb = db;
   inv = await collectInventory(db);
 });
 
@@ -49,10 +53,14 @@ describe('schema and grant inventory', () => {
     ]);
   });
 
-  it('keeps money columns out of every operational API result', () => {
+  it('keeps money out of every operational API name, argument and result field', () => {
     const money = /cents|cost|vendor_name|payment|category|receipt|budget|amount|total|variance/;
     const fns = inv.functions.filter((f) => f.schema === 'eden_api').map((f) => f.name);
     for (const f of fns) expect(f).not.toMatch(money);
+    // Every published operation has a pinned result, and no result field is money.
+    const pinned = inv.apiResults.map((r) => r.name).sort();
+    expect(pinned).toEqual([...new Set(fns)].sort());
+    for (const r of inv.apiResults) expect(r.returns, r.name).not.toMatch(money);
   });
 
   it('puts no Eden table in the Realtime publication and adds no storage policy', () => {
@@ -62,6 +70,39 @@ describe('schema and grant inventory', () => {
 
   it('removes the GraphQL extension', () => {
     expect(inv.extensions).toEqual([]);
+  });
+
+  // Review P0-3: the fixture must start the way a hosted project does, with
+  // pg_graphql installed, or the assertion above proves nothing.
+  it('starts from a project that has pg_graphql installed, so the removal is real', async () => {
+    const empty = await emptyProject();
+    const { rows } = await empty.query(`select extname from pg_extension where extname = 'pg_graphql'`);
+    expect(rows).toEqual([{ extname: 'pg_graphql' }]);
+    const graphqlSchema = await empty.query(`select 1 from pg_namespace where nspname = 'graphql'`);
+    expect(graphqlSchema.rows).toHaveLength(1);
+  });
+
+  it('leaves no GraphQL resolver for anon or authenticated to call', async () => {
+    for (const role of ['anon', 'authenticated']) {
+      const err = await graphqlDb.transaction(async (tx) => {
+        await tx.query(`set local role ${role}`);
+        try {
+          await tx.query(`select graphql.resolve('{__schema{types{name}}}')`);
+          return null;
+        } catch (e) {
+          return e;
+        }
+      });
+      expect(err, role).toBeTruthy();
+      expect(['3F000', '42883', '42501'], role).toContain(err.code);
+    }
+  });
+
+  it('no migration re-creates the GraphQL extension', () => {
+    for (const file of migrationFiles()) {
+      const sql = stripSqlComments(readFileSync(join(migrationsDir, file), 'utf8'));
+      expect(sql, file).not.toMatch(/create\s+extension[^;]*pg_graphql/i);
+    }
   });
 });
 

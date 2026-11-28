@@ -121,8 +121,23 @@ export async function collectInventory(db) {
 
   const extensions = await q(`select extname as name from pg_extension where extname = 'pg_graphql'`);
 
+  // Review P0-2: the exact result fields of every published operation, so an
+  // added output column (a money field included) is an inventory difference.
+  const apiResults = await q(`
+    select p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' as name,
+           pg_get_function_result(p.oid) as returns
+    from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'eden_api'`);
+
+  // Every row policy on the Eden schemas, with its roles and expressions.
+  const policies = await q(`
+    select schemaname as schema, tablename as name, policyname as policy, cmd,
+           roles::text as roles, coalesce(qual, '') as using, coalesce(with_check, '') as check
+    from pg_policies where schemaname = any($1)`, [EDEN_SCHEMAS]);
+
   return {
     schemaUsage, relations, columns, functions, rls, realtime, storagePolicies,
     definers, definerRoleGrants, definerRolePolicies, definerRoleAttributes, extensions,
+    apiResults, policies,
   };
 }

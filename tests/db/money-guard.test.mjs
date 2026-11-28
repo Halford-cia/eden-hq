@@ -28,7 +28,7 @@ beforeAll(async () => {
   // Seeded by the operator role: Stage 1 has no app write path for money.
   await asAdmin(db, (tx) => tx.query(
     `insert into eden.task_budgets (task_id, workspace_id, project_id, estimated_cents, actual_cents, vendor_name, category)
-     values ($1, $2, $3, 10000, 12500, 'SYNTHETIC Example Co.', 'SYNTHETIC Framing')`,
+     values ($1, $2, $3, 731337, 1234567, 'SYNTHETIC Ledger vendor', 'SYNTHETIC Ledger category')`,
     [task.id, cast.ws.home_building, project.id]));
 });
 
@@ -36,7 +36,7 @@ describe('reading money rows', () => {
   it('an active owner of the workspace can read the budget row', async () => {
     const { rows } = await asUser(db, cast.owner.id, (tx) => tx.query(SELECT_BUDGETS));
     expect(rows).toHaveLength(1);
-    expect(Number(rows[0].estimated_cents)).toBe(10000);
+    expect(Number(rows[0].estimated_cents)).toBe(731337);
   });
 
   it('a same-workspace member, the manager and a stranger receive no money rows', async () => {
@@ -128,8 +128,110 @@ describe('operational results never carry money', () => {
     ];
     for (const k of keys) expect(k).not.toMatch(money);
     const text = JSON.stringify(results);
-    expect(text).not.toContain('12500');
-    expect(text).not.toContain('Example Co.');
+    expect(text).not.toContain('1234567');
+    expect(text).not.toContain('Ledger vendor');
+  });
+});
+
+// Review P0-2: every published operation, not a chosen few. Each one is called
+// as an owner (the positive control for "money exists") and as a member of the
+// same workspace, with money seeded on the task they read. Every key at every
+// depth of every result, and the text of every refusal, is inspected.
+describe('every published operation, including nested JSON', () => {
+  const MONEY_KEY = /cents|cost|vendor|payment|paid|category|receipt|budget|amount|total|variance|money|estimat|actual|spend|price/i;
+  const MONEY_TEXT = ['731337', '1234567', 'Ledger vendor', 'Ledger category'];
+
+  function keysDeep(value, out = []) {
+    if (Array.isArray(value)) {
+      for (const v of value) keysDeep(v, out);
+    } else if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        out.push(k);
+        keysDeep(v, out);
+      }
+    }
+    return out;
+  }
+
+  async function publishedOperations() {
+    const { rows } = await asAdmin(db, (tx) => tx.query(
+      `select p.proname as name from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'eden_api' order by 1`));
+    return rows.map((r) => r.name);
+  }
+
+  // Arguments for each operation, fresh per caller so every write can succeed.
+  async function casesFor(who) {
+    const [contact] = await asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_contact', {
+      p_workspace_id: cast.ws.home_building, p_display_name: `SYNTHETIC contact for ${who.label}`, p_kind: 'person',
+    }));
+    const scratchProject = (n) => asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_project', {
+      p_workspace_id: cast.ws.home_building, p_name: `SYNTHETIC scratch ${n} for ${who.label}`,
+    })).then((r) => r[0]);
+    const scratchTask = (n) => asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_task', {
+      p_project_id: project.id, p_kind: 'task', p_title: `SYNTHETIC scratch task ${n} for ${who.label}`,
+    })).then((r) => r[0]);
+    const [p, p2, t, t2, t3] = [
+      await scratchProject(1), await scratchProject(2), await scratchTask(1), await scratchTask(2), await scratchTask(3),
+    ];
+    // The read target carries money, an update thread and an assignee.
+    const [{ version }] = await asUser(db, cast.owner.id, (tx) => rpc(tx, 'get_task', { p_task_id: task.id }));
+    await asUser(db, cast.owner.id, (tx) => rpc(tx, 'add_update', { p_task_id: task.id, p_body: 'SYNTHETIC note' }));
+    return {
+      my_workspaces: {},
+      list_assignees: { p_workspace_id: cast.ws.home_building },
+      create_contact: { p_workspace_id: cast.ws.home_building, p_display_name: `SYNTHETIC new ${who.label}`, p_kind: 'vendor' },
+      set_contact_archived: { p_contact_id: contact.id, p_archived: true },
+      list_projects: { p_workspace_id: cast.ws.home_building, p_include_archived: true },
+      get_project: { p_project_id: project.id },
+      create_project: { p_workspace_id: cast.ws.home_building, p_name: `SYNTHETIC created by ${who.label}` },
+      update_project: { p_project_id: p.id, p_expected_version: p.version, p_name: `SYNTHETIC renamed by ${who.label}` },
+      set_project_archived: { p_project_id: p2.id, p_expected_version: p2.version, p_archived: true },
+      list_tasks: { p_project_id: project.id, p_filters: { include_archived: true } },
+      get_task: { p_task_id: task.id },
+      create_task: { p_project_id: project.id, p_kind: 'task', p_title: `SYNTHETIC by ${who.label}` },
+      update_task: { p_task_id: t.id, p_expected_version: t.version, p_changes: { description: 'SYNTHETIC edit' } },
+      set_task_status: { p_task_id: t2.id, p_expected_version: t2.version, p_status: 'in_progress' },
+      set_task_archived: { p_task_id: t3.id, p_expected_version: t3.version, p_archived: true },
+      add_update: { p_task_id: task.id, p_body: `SYNTHETIC update by ${who.label}` },
+      list_updates: { p_task_id: task.id },
+      export_project: { p_project_id: project.id },
+      _version: version,
+    };
+  }
+
+  it('covers every published operation', async () => {
+    const cases = await casesFor(cast.owners[3]);
+    const covered = Object.keys(cases).filter((k) => !k.startsWith('_')).sort();
+    expect(covered).toEqual(await publishedOperations());
+  });
+
+  for (const role of ['owner', 'member']) {
+    it(`as a same-workspace ${role}: no money key at any depth, no money value, no money in a refusal`, async () => {
+      const who = role === 'owner' ? cast.owners[1] : cast.homeMember;
+      const cases = await casesFor(who);
+      let answered = 0;
+      for (const name of await publishedOperations()) {
+        let result;
+        try {
+          result = await asUser(db, who.id, (tx) => rpc(tx, name, cases[name]));
+          answered += 1;
+        } catch (e) {
+          // Owner-only operations refuse the member; the refusal carries no money.
+          expect(role, `${name} refused the owner: ${e.message}`).toBe('member');
+          result = { message: e.message, detail: e.detail, hint: e.hint };
+        }
+        for (const k of keysDeep(result)) expect(k, `${name} returned key ${k}`).not.toMatch(MONEY_KEY);
+        const text = JSON.stringify(result);
+        for (const v of MONEY_TEXT) expect(text, `${name} returned a money value`).not.toContain(v);
+      }
+      expect(answered).toBeGreaterThan(10);
+    });
+  }
+
+  it('positive control: the owner can read the seeded money directly, so the absence above is meaningful', async () => {
+    const { rows } = await asUser(db, cast.owners[1].id, (tx) => tx.query(SELECT_BUDGETS));
+    expect(JSON.stringify(rows)).toContain('Ledger vendor');
   });
 });
 

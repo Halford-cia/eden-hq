@@ -67,13 +67,16 @@ grant usage on schema storage to anon, authenticated, service_role;
 
 create publication supabase_realtime;
 
--- What \`supabase db push\` records for each applied migration.
+grant usage on schema public to anon, authenticated, service_role;
+`;
+
+// What \`supabase db push\` creates on its first run and records for each
+// applied migration. A new hosted project does not have it.
+const MIGRATION_LEDGER = `
 create schema supabase_migrations;
-create table supabase_migrations.schema_migrations (version text primary key, name text);
+create table supabase_migrations.schema_migrations (version text primary key, statements text[], name text);
 alter schema supabase_migrations owner to ${MIGRATOR};
 alter table supabase_migrations.schema_migrations owner to ${MIGRATOR};
-
-grant usage on schema public to anon, authenticated, service_role;
 `;
 
 export function migrationFiles() {
@@ -82,11 +85,50 @@ export function migrationFiles() {
     .sort();
 }
 
-/** Fresh database with every migration applied, as Supabase's postgres would. */
-export async function freshDb({ upTo } = {}) {
+/** SQL text without -- line comments and block comments (strings kept). */
+export function stripSqlComments(sql) {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
+}
+
+/**
+ * A new, empty hosted project before any migration: Supabase's roles and
+ * schemas, with no Eden objects and no migration ledger.
+ */
+export async function emptyProject() {
   // Calendar dates stay 'YYYY-MM-DD' strings, as the Data API returns them.
   const db = await PGlite.create({ parsers: { 1082: (v) => v } });
   await db.exec(SUPABASE_SIM);
+  await installGraphqlStandIn(db);
+  return db;
+}
+
+// A hosted project starts with pg_graphql enabled (schema `graphql`), and
+// Supabase lets its non-superuser postgres drop it. PGlite has no pg_graphql,
+// so a SYNTHETIC stand-in with the same name, schema and a resolver function
+// is installed by the migration role (review P0-3: the removal test must
+// start with the extension present).
+async function installGraphqlStandIn(db) {
+  const share = (await db.query(`select setting from pg_config where name = 'SHAREDIR'`)).rows[0].setting;
+  const FS = db.mod.FS;
+  FS.writeFile(`${share}/extension/pg_graphql.control`, [
+    "comment = 'SYNTHETIC stand-in for Supabase pg_graphql'",
+    "default_version = '1.5.11'",
+    'relocatable = false',
+    'schema = graphql',
+    'trusted = true',
+    '',
+  ].join('\n'));
+  FS.writeFile(`${share}/extension/pg_graphql--1.5.11.sql`,
+    "create function graphql.resolve(query text) returns jsonb language sql stable as $$ select '{}'::jsonb $$;\n"
+    + 'grant usage on schema graphql to anon, authenticated, service_role;\n'
+    + 'grant execute on function graphql.resolve(text) to anon, authenticated, service_role;\n');
+  await db.exec(`set role ${MIGRATOR}; create extension pg_graphql; reset role;`);
+}
+
+/** Fresh database with every migration applied, as Supabase's postgres would. */
+export async function freshDb({ upTo } = {}) {
+  const db = await emptyProject();
+  await db.exec(MIGRATION_LEDGER);
   for (const file of migrationFiles()) {
     if (upTo && file > upTo) break;
     const sql = readFileSync(join(migrationsDir, file), 'utf8');
