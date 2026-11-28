@@ -8,6 +8,7 @@
 // deleting a publishable key does not revoke user sessions on that project.
 
 import { parseCsvRecords } from './csv.mjs';
+import { checkAccounts } from './accounts-core.mjs';
 
 export const PURPOSES = ['production', 'replacement', 'drill', 'rehearsal'];
 export const STATES = ['serving', 'closed', 'keys removed', 'deleted'];
@@ -68,15 +69,21 @@ export async function closeGate(db, by) {
  *   connect(ref) -> db handle for that project, or throws when unreachable.
  * Returns { opened, refusals }.
  */
-export async function openGate({ register, targetRef, connect, by, synthetic = false }) {
+export async function openGate({ register, targetRef, connect, by, synthetic = false, expectedAccounts = null }) {
   const refusals = [];
   const target = register.find((e) => e.ref === targetRef);
   if (!target) {
     return { opened: false, refusals: [`${targetRef}: not in the project register`] };
   }
   if (target.state === 'deleted') refusals.push(`${targetRef}: the register marks it deleted`);
-  if ((target.purpose === 'drill' || target.purpose === 'rehearsal') && !synthetic) {
+  const copy = target.purpose === 'drill' || target.purpose === 'rehearsal';
+  if (copy && !synthetic) {
     refusals.push(`${targetRef}: a ${target.purpose} copy opens only when it holds synthetic data (pass --synthetic-data to confirm)`);
+  }
+  // The confirmation is checked, not taken on trust (review round 2, P1-2):
+  // the copy's Auth rows must be exactly the expected test accounts.
+  if (synthetic && !(expectedAccounts && expectedAccounts.length)) {
+    refusals.push(`${targetRef}: --synthetic-data needs --expected-accounts <file>, the test accounts the copy may hold`);
   }
 
   for (const other of register) {
@@ -104,6 +111,15 @@ export async function openGate({ register, targetRef, connect, by, synthetic = f
 
   const db = await connect(targetRef);
   try {
+    if (synthetic) {
+      const { ok, problems } = await checkAccounts(db, expectedAccounts);
+      if (!ok) {
+        return {
+          opened: false,
+          refusals: problems.map((p) => `${targetRef}: ${p}; it may hold a real person, so it stays closed`),
+        };
+      }
+    }
     await db.query(
       `insert into eden_private.access_gate (id, is_open, changed_by, changed_at)
        values (1, true, $1, now())

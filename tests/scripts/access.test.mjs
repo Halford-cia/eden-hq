@@ -3,7 +3,7 @@
 // closed before another opens; unreachable or keys-removed is not enough.
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { freshDb, MIGRATOR } from '../db/harness.mjs';
+import { freshDb, MIGRATOR, createAuthUser } from '../db/harness.mjs';
 import {
   parseRegister, refFromConnectionString, openGate, closeGate, readGate,
 } from '../../scripts/lib/access-core.mjs';
@@ -119,7 +119,19 @@ describe('access:open', () => {
     const r1 = await openGate({ register: reg, targetRef: DRILL, connect: reachable([DRILL]), by: 'test' });
     expect(r1.opened).toBe(false);
     expect(r1.refusals.join()).toMatch(/synthetic/);
-    const r2 = await openGate({ register: reg, targetRef: DRILL, connect: reachable([DRILL]), by: 'test', synthetic: true });
+    // The confirmation alone is not enough any more (review round 2, P1-2):
+    // the copy's Auth rows must be the expected test accounts.
+    const bare = await openGate({ register: reg, targetRef: DRILL, connect: reachable([DRILL]), by: 'test', synthetic: true });
+    expect(bare.opened).toBe(false);
+    expect(bare.refusals.join()).toMatch(/expected-accounts/);
+    // Auth rows are written by the platform, not the migration role.
+    await dbs[DRILL].query('reset role');
+    const tester = await createAuthUser(dbs[DRILL], 'drill-tester');
+    await dbs[DRILL].query(`set role ${MIGRATOR}`);
+    const r2 = await openGate({
+      register: reg, targetRef: DRILL, connect: reachable([DRILL]), by: 'test', synthetic: true,
+      expectedAccounts: [{ id: tester.id, subject: tester.subject }],
+    });
     expect(r2.opened).toBe(true);
     await closeGate(dbs[DRILL], 'test');
   });

@@ -113,7 +113,20 @@ Record pass/fail in your setup notes (private).
 
 ## 7. CI and the local public-repository guard
 
-1. Move `docs/ci/github-actions-ci.yml` to `.github/workflows/ci.yml` in a PR from your own account (the agent's token has no workflow scope). CI runs every `check:public` rule except the deny-list over exactly the commits of the pull request or push (the event's base and head), all tests (it installs the PostgreSQL 17 client tools for the restore test) and a synthetic build with `check:dist`.
+1. **Before you merge the Stage 1 pull request (#2)**, activate CI on its branch from your own account. GitHub refuses workflow files from the agent's token (it has no `workflow` scope), so this one push is yours:
+
+   ```sh
+   gh pr checkout 2
+   mkdir -p .github/workflows
+   git mv docs/ci/github-actions-ci.yml .github/workflows/ci.yml
+   git commit -m "Activate CI"
+   git push
+   gh pr checks 2 --watch
+   ```
+
+   Run it in your clone of this repository (its `origin` is the main repository, so `gh` finds PR #2 there).
+
+   The branch lives on the agent's fork; `gh pr checkout` pushes back to it while the PR allows maintainer edits. If GitHub shows **Approve and run** on the PR (a fork's first workflow run), approve it. Merge only after the `ci` check has run on the PR's head and passed. CI runs every `check:public` rule except the deny-list over exactly the commits of the pull request or push (the event's base and head), all tests (it installs the PostgreSQL 17 client tools for the restore test) and a synthetic build with `check:dist`.
 2. Create your private deny-list outside the repository, one term per line (real addresses, family and staff names, property names, plan terms). Then in your shell profile:
 
    ```sh
@@ -131,13 +144,18 @@ Record pass/fail in your setup notes (private).
 2. Database Settings → SSL Configuration → download the CA certificate. Keep it outside the repository.
 3. Append `?sslmode=verify-full&sslrootcert=<path to the certificate>` to the string. The scripts refuse a remote string without it.
 4. Keep the full string in the password manager and paste it at the prompt.
+5. **Never type the string, or the password, into a shell command.** zsh saves every command in `~/.zsh_history`. The one place `psql` is used directly (step 11.8) gives it the host, user and TLS settings as connection options and no password; `-W` makes `psql` ask for the password at a hidden prompt:
+
+   ```sh
+   psql "host=<pooler-host> port=5432 dbname=postgres user=postgres.<ref> sslmode=verify-full sslrootcert=<path to the certificate>" -W -c "select 1"
+   ```
 
 ## 9. Synthetic test accounts and opening the gate
 
 The migrations seed the two workspaces (time zone `America/Chicago`) and create the access gate **closed**: until step 9.5 everyone, you included, sees no workspace. In this step only the six test accounts are enrolled; no real person signs in to Eden HQ until step 12.
 
 1. In a private browser window per account, open the site and **Sign in with Google** once as each of the six test accounts. Each sees "Ask Hank for workspace access".
-2. `npm run roster:pending` lists each Auth account without access: UUID, Google subject and verified address. Check each address is one of the six test accounts.
+2. `npm run roster:pending` lists each Auth account without access: UUID, Google subject and verified address. Check each address is one of the six test accounts. In Supabase → Authentication → Users, check there are exactly six users. Then write the **expected-accounts file** in the password manager, next to the synthetic roster: header `user_id,google_subject` and one line per test account with its UUID and Google subject from `roster:pending`, six lines in all. The drill checks every restored Auth user and identity against it (step 11): a copy holding anyone else is never opened.
 3. Keep a **synthetic roster** CSV in the password manager, separate from the real roster you write in step 12. Header and shape (display names are invented):
 
    ```text
@@ -256,14 +274,17 @@ All in the Eden HQ Google Cloud project, as its Owner. Every grant is on the nam
 9. Schedules (UTC, so runs are always 24 hours apart):
 
    ```sh
-   for pair in "eden-backup-daily|0 9 * * *|eden-backup" "eden-backup-watch-hourly|15 * * * *|eden-backup-watch"; do
-     IFS='|' read -r name cron job <<< "$pair"
-     gcloud scheduler jobs create http "$name" --location <r> --schedule "$cron" --time-zone Etc/UTC \
-       --uri "https://run.googleapis.com/v2/projects/<p>/locations/<r>/jobs/$job:run" --http-method POST \
-       --oauth-service-account-email eden-backup-scheduler@<p>.iam.gserviceaccount.com \
-       --oauth-token-scope https://www.googleapis.com/auth/cloud-platform
-   done
+   gcloud scheduler jobs create http eden-backup-daily --location <r> --schedule "0 9 * * *" --time-zone Etc/UTC \
+     --uri "https://run.googleapis.com/v2/projects/<p>/locations/<r>/jobs/eden-backup:run" --http-method POST \
+     --oauth-service-account-email eden-backup-scheduler@<p>.iam.gserviceaccount.com \
+     --oauth-token-scope https://www.googleapis.com/auth/cloud-platform
+   gcloud scheduler jobs create http eden-backup-watch-hourly --location <r> --schedule "15 * * * *" --time-zone Etc/UTC \
+     --uri "https://run.googleapis.com/v2/projects/<p>/locations/<r>/jobs/eden-backup-watch:run" --http-method POST \
+     --oauth-service-account-email eden-backup-scheduler@<p>.iam.gserviceaccount.com \
+     --oauth-token-scope https://www.googleapis.com/auth/cloud-platform
    ```
+
+   The job names are written out, never built from a shell variable: in zsh, `$job:run` reads `:r` as a modifier and gives `…/jobs/eden-backupun`. Check both targets: `gcloud scheduler jobs describe eden-backup-daily --location <r> --format='value(httpTarget.uri)'` must end in `/jobs/eden-backup:run`, and `eden-backup-watch-hourly` in `/jobs/eden-backup-watch:run`.
 
 10. Alerts. Create an email notification channel to yourself (Monitoring → Alerting → Edit notification channels), then two log-based metrics:
 
@@ -288,7 +309,7 @@ The Stage 1 drill restores a set taken while production held only the step 9 tes
 
 *Before the drill: the snapshot, then the changes it must not contain.*
 
-1. Wait for a set that ends in `sets/<timestamp>/COMPLETE` (step 10), taken after step 9.6. Run `npm run roster:show` on production and confirm only the six test accounts are listed: the set then holds no real person.
+1. Wait for a set that ends in `sets/<timestamp>/COMPLETE` (step 10), taken after step 9.6. A set holds **every** Auth user and identity, including a Google account that signed in once and has no membership, so `roster:show` (memberships only) is not proof of who is in it. Before the set's time, Supabase → Authentication → Users on production must list exactly the six test accounts. The drill then proves it on the restored copy itself (steps 7 and 12, against the step 9.2 expected-accounts file) and keeps the copy closed on any difference.
 2. Then, in the synthetic roster, downgrade Owner C to `member` in `stay_eden_ops` and delete the Helper's `home_building` line. Apply it to production (`roster:apply`, `roster:show`). These changes are newer than the set: the drill must bring them back from the roster, not from the restored rows.
 
 *Restore, gate closed.*
@@ -303,11 +324,17 @@ The Stage 1 drill restores a set taken while production held only the step 9 tes
 
    It checks every file against the manifest (present, recorded size and hash) and the client tools (17 or later), refuses a database that already holds Eden, then runs each step (remove GraphQL, Eden roles, Auth rows, Eden schemas and rows, the membership helper's owner, the migration ledger) and **stops at the first error**. On a failure it names the step: delete the drill project and start again (rerun with `--show-errors` to see the tool's message on your terminal only). The access gate arrives **closed**: its data is never in a set.
 6. Authentication → Users on the drill: sign out every user (sets hold no sessions, so there should be none).
-7. `npm run restore:verify -- <decrypted set folder>` with the drill's string. Every line must read PASS: the set files, migrations, the table list, every row count, Auth counts, the closed gate, row-level security on every Eden table, the membership helper owned by its own role, and the restored grants and policies. It prints names only, never values.
-8. Confirm the gate holds (the positive closed-gate check): set the drill's Data API **Exposed schemas** to exactly `eden_api`, then run the step 6 `curl` checks with the drill's URL and publishable key (no rows, `eden` refused), and over the direct connection:
+7. With the drill's string, and the expected-accounts file saved to a temporary file outside the repository:
 
    ```sh
-   psql "<drill string>" -c "begin; set local role authenticated; select set_config('request.jwt.claims', '{\"sub\":\"<Owner A uuid>\",\"role\":\"authenticated\"}', true); select count(*) from eden_api.my_workspaces(); rollback;"
+   npm run restore:verify -- <decrypted set folder> --expected-accounts <expected-accounts file>
+   ```
+
+   Every line must read PASS: the set files, migrations, the table list, every row count, Auth counts, the closed gate, row-level security on every Eden table, the membership helper owned by its own role, the restored grants and policies, and **Auth users and identities are exactly the expected test accounts**. It prints names and counts only, never values. If that last line fails, the set holds someone who is not a test account: treat it as real data, stop after step 8 and never open the copy.
+8. Confirm the gate holds (the positive closed-gate check): set the drill's Data API **Exposed schemas** to exactly `eden_api`, then run the step 6 `curl` checks with the drill's URL and publishable key (no rows, `eden` refused), and over the direct connection. The host, user and certificate go in the connection options, never the password: `-W` asks for it at a hidden prompt, so nothing secret reaches your shell history (step 8.5):
+
+   ```sh
+   psql "host=<drill pooler host> port=5432 dbname=postgres user=postgres.<drill ref> sslmode=verify-full sslrootcert=<path to the certificate>" -W -c "begin; set local role authenticated; select set_config('request.jwt.claims', '{\"sub\":\"<Owner A uuid>\",\"role\":\"authenticated\"}', true); select count(*) from eden_api.my_workspaces(); rollback;"
    #   → 0: the restored owner gets no workspace while the gate is closed
    ```
 
@@ -321,7 +348,7 @@ The Stage 1 drill restores a set taken while production held only the step 9 tes
     - Google → the OAuth client: add the redirect URI `https://<drill ref>.supabase.co/auth/v1/callback` and the JavaScript origin `http://127.0.0.1:5173`.
     - In your checkout: `.env.local` with `VITE_SUPABASE_URL=https://<drill ref>.supabase.co` and the drill's publishable key, then `npm run dev`.
 11. Roster, from the **current** synthetic roster (never the restored rows): `npm run roster:apply -- <roster file> --dry-run`, then for real, then `npm run roster:show`. It must show Owner C as a member in Stay Eden and no Helper in Home building.
-12. `npm run access:open -- <register file> --synthetic-data` with the drill's string. It refuses unless production (and every other entry not `deleted`) reads back closed. Mark the drill `serving` while it is open.
+12. `npm run access:open -- <register file> --synthetic-data --expected-accounts <expected-accounts file>` with the drill's string. It refuses unless production (and every other entry not `deleted`) reads back closed, and unless the drill's Auth users and identities are still exactly the six test accounts. Mark the drill `serving` while it is open. Delete the temporary expected-accounts file.
 13. Check at `http://127.0.0.1:5173`, one private window per account: Owner C sees Stay Eden as a member (no New property, no Archive) and Home building as an owner; the Helper sees "Ask Hank for workspace access"; the Manager sees only Stay Eden; Owner A sees the restored synthetic project and property. Record pass or fail for each.
 
 *Exit (pass, fail or abandoned), then reopen production.*

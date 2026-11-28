@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { repoRoot } from '../db/harness.mjs';
@@ -280,8 +280,18 @@ describe('check:public reviews the outgoing revision range', () => {
     expect(remote.stdout.trim()).toBe('');
   });
 
-  it('the CI template takes the range from the event, not from origin/main', () => {
-    const yml = readFileSync(join(repoRoot, 'docs', 'ci', 'github-actions-ci.yml'), 'utf8');
+  // Review round 2, P1-1: the agent's token cannot push a workflow file, so
+  // Hank moves the template into .github/workflows/ (SETUP.md step 7.1).
+  // Before and after the move there is exactly one CI definition.
+  const activeCi = join(repoRoot, '.github', 'workflows', 'ci.yml');
+  const templateCi = join(repoRoot, 'docs', 'ci', 'github-actions-ci.yml');
+
+  it('there is exactly one CI definition: the template, or the active workflow after Hank moves it', () => {
+    expect(existsSync(activeCi) !== existsSync(templateCi)).toBe(true);
+  });
+
+  it('the CI definition takes the range from the event, not from origin/main', () => {
+    const yml = readFileSync(existsSync(activeCi) ? activeCi : templateCi, 'utf8');
     expect(yml).toContain('github.event.pull_request.base.sha');
     expect(yml).toContain('github.event.pull_request.head.sha');
     expect(yml).toContain('github.event.before');

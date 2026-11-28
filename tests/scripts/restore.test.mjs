@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import {
-  freshDb, emptyProject, seedCast, asUser, asAdmin, rpc, MIGRATOR, reopenAs, repoRoot,
+  freshDb, emptyProject, seedCast, asUser, asAdmin, rpc, MIGRATOR, reopenAs, repoRoot, migrationFiles,
 } from '../db/harness.mjs';
 import {
   dumpCommands, edenRolesOnly, snapshotFacts, buildManifest,
@@ -63,8 +63,8 @@ async function newProject() {
 
 const restoreApply = (dir, url, extra = []) => run(process.execPath,
   [join(repoRoot, 'scripts', 'restore-apply.mjs'), dir, ...extra], { input: `${url}\n` });
-const restoreVerify = (dir, url) => run(process.execPath,
-  [join(repoRoot, 'scripts', 'restore-verify.mjs'), dir], { input: `${url}\n` });
+const restoreVerify = (dir, url, extra = []) => run(process.execPath,
+  [join(repoRoot, 'scripts', 'restore-verify.mjs'), dir, ...extra], { input: `${url}\n` });
 
 let tools = true;
 let source;
@@ -144,6 +144,31 @@ describe('clean restore with the native tools, as a non-superuser', () => {
       expect(vout, vout).toContain('restore:verify PASSED');
       expect(vout).not.toContain('FAIL ');
       expect(verified.code).toBe(0);
+
+      // Review round 2, P1-2: the set holds every Auth account. The cast's
+      // roster shows six people; the seventh signed in and is pending. Checked
+      // against the six, the copy fails; against all seven, it passes.
+      const accDir = mkdtempSync(join(tmpdir(), 'eden-accounts-'));
+      const accountsFile = (people) => {
+        const f = join(accDir, `accounts-${people.length}.csv`);
+        writeFileSync(f, ['user_id,google_subject', ...people.map((u) => `${u.id},${u.subject}`)].join('\n'));
+        return f;
+      };
+      const six = [...cast.owners, cast.manager, cast.homeMember];
+      const short = await restoreVerify(setDir, url, ['--expected-accounts', accountsFile(six)]);
+      const sout = `${short.stdout}${short.stderr}`;
+      expect(sout).toContain('FAIL  Auth users and identities are exactly the expected test accounts');
+      expect(sout).toContain('1 Auth user is not an expected test account');
+      expect(sout).toContain('restore:verify FAILED');
+      expect(short.code).toBe(1);
+      for (const u of [...six, cast.stranger]) {
+        expect(sout).not.toContain(u.id);
+        expect(sout).not.toContain(u.subject);
+      }
+      const exact = await restoreVerify(setDir, url, ['--expected-accounts', accountsFile([...six, cast.stranger])]);
+      const eout = `${exact.stdout}${exact.stderr}`;
+      expect(eout, eout).toContain('PASS  Auth users and identities are exactly the expected test accounts');
+      expect(exact.code).toBe(0);
     } finally {
       await server.stop();
     }
@@ -158,7 +183,7 @@ describe('clean restore with the native tools, as a non-superuser', () => {
       `select has_schema_privilege('eden_membership_reader', 'eden_private', 'CREATE') as c`);
     expect(create.rows[0].c).toBe(false);
     const ledger = await target.query('select version from supabase_migrations.schema_migrations order by 1');
-    expect(ledger.rows.map((r) => r.version)).toEqual(['20261127000100', '20261127000200']);
+    expect(ledger.rows.map((r) => r.version)).toEqual(migrationFiles().map((f) => f.split('_')[0]));
     expect((await target.query(`select count(*)::int as n from pg_extension where extname = 'pg_graphql'`)).rows[0].n).toBe(0);
 
     // Closed gate: an owner gets nothing. Opened (after roster:apply in the
