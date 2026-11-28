@@ -1,0 +1,11 @@
+# Cloud Build recipe for the backup image (docs/SETUP.md, Recovery step 7).
+# Run from the repository root of a clean checkout of main.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'backup/Dockerfile', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'
+substitutions:
+  _IMAGE: ''
+options:
+  logging: CLOUD_LOGGING_ONLY

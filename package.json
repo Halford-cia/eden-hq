@@ -1,0 +1,38 @@
+{
+  "name": "eden-hq",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Eden HQ: internal projects and tasks for the Home building and Stay Eden operations workspaces.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/build-guard.mjs && vite build",
+    "preview": "vite preview",
+    "test": "npm run test:db && npm run test:web && npm run test:scripts",
+    "test:db": "vitest run tests/db",
+    "test:web": "vitest run tests/web",
+    "test:scripts": "vitest run tests/scripts",
+    "check:public": "node scripts/check-public.mjs",
+    "check:dist": "node scripts/check-dist.mjs",
+    "roster:pending": "node scripts/roster.mjs pending",
+    "roster:apply": "node scripts/roster.mjs apply",
+    "roster:show": "node scripts/roster.mjs show",
+    "access:open": "node scripts/access.mjs open",
+    "access:close": "node scripts/access.mjs close",
+    "restore:verify": "node scripts/restore-verify.mjs",
+    "inventory:print": "node scripts/inventory-print.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.119.2",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.16",
+    "happy-dom": "21.0.4",
+    "vite": "8.4.0",
+    "vitest": "5.1.2"
+  }
+}

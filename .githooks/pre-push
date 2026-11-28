@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs check:public with the private deny-list before anything leaves this
+# machine (a pushed commit is already public). Enable once per clone:
+#   git config core.hooksPath .githooks
+exec npm run --silent check:public

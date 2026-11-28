@@ -1,0 +1,45 @@
+# Local development settings for the Supabase CLI. Hosted settings are set by
+# Hank in the dashboard (docs/SETUP.md); keep the two in step.
+# No secrets here: the Google client values come from environment variables.
+
+project_id = "eden-hq"
+
+[api]
+enabled = true
+port = 54321
+# The Data API exposes exactly one schema.
+schemas = ["eden_api"]
+extra_search_path = []
+max_rows = 100
+
+[db]
+port = 54322
+major_version = 17
+
+[realtime]
+# v1 uses no Realtime channels.
+enabled = false
+
+[storage]
+enabled = true
+file_size_limit = "10MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:5173"
+additional_redirect_urls = ["http://127.0.0.1:5173/auth/callback"]
+# First-time Google sign-ins create an identity; membership grants access.
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = false
+
+[auth.sms]
+enable_signup = false
+
+[auth.external.google]
+enabled = true
+client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
+skip_nonce_check = false

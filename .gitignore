@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.DS_Store
+
+# Environment files: only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
+
+# Never commit private operator files (they belong in Hank's password manager).
+*roster*.csv
+*register*.csv
+*.age
+*.dump
+*.backup
+*.crt
+*.pem
