@@ -5,10 +5,10 @@
 
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { freshDb, seedCast, asUser, asAdmin, rpc } from '../db/harness.mjs';
-import { createApi } from '../../src/api.js';
+import { createApi, createAuth } from '../../src/api.js';
 import { createApp } from '../../src/app.js';
 import { parseCsv } from '../../scripts/lib/csv.mjs';
-import { fakeSupabase, fakeAuth, settle, byText } from './fake-supabase.mjs';
+import { fakeSupabase, fakeAuth, fakeAuthClient, settle, byText } from './fake-supabase.mjs';
 
 let db;
 let cast;
@@ -119,6 +119,121 @@ describe('entry', () => {
     expect(m.app.state.workspaces).toBeNull();
     expect(m.app.state.listCache.size).toBe(0);
     expect(m.root.textContent).toContain('Sign in with Google');
+  });
+});
+
+// Review P0-1: an account change on an already-open tab.
+describe('account change on an open tab', () => {
+  async function homeTask(title) {
+    const [p] = await asUser(db, cast.owner.id, (tx) =>
+      rpc(tx, 'create_project', { p_workspace_id: cast.ws.home_building, p_name: `SYNTHETIC ${title} build` }));
+    const [t] = await asUser(db, cast.owner.id, (tx) =>
+      rpc(tx, 'create_task', { p_project_id: p.id, p_kind: 'task', p_title: `SYNTHETIC ${title}`, p_description: 'SYNTHETIC private detail' }));
+    return { p, t };
+  }
+
+  it('the previous account\'s Home task leaves the screen the moment another account signs in', async () => {
+    const { p, t } = await homeTask('Switch task');
+    const m = mount(cast.owner, { path: `/p/${p.id}?task=${t.id}` });
+    await m.app.render();
+    await settle();
+    expect(m.root.textContent).toContain('SYNTHETIC Switch task');
+
+    m.auth.switchUser(cast.manager);
+    // Synchronously: nothing of the owner's screen is left.
+    expect(m.root.textContent).not.toContain('SYNTHETIC Switch task');
+    expect(m.root.textContent).not.toContain('SYNTHETIC private detail');
+    expect(m.app.state.workspaces).toBeNull();
+    expect(m.app.state.listCache.size).toBe(0);
+
+    await settle();
+    // The manager gets the same answer as a fresh request: not available.
+    expect(m.root.textContent).toContain('Not available');
+    expect(m.root.textContent).not.toContain('SYNTHETIC Switch task');
+    expect(m.app.state.workspaces.map((w) => w.kind)).toEqual(['stay_eden_ops']);
+  });
+
+  it('a response still in flight for the previous account is discarded', async () => {
+    const { p } = await homeTask('Inflight task');
+    const m = mount(cast.owner, { path: `/p/${p.id}` });
+    m.client.delayMs = 40;
+    const pending = m.app.render();
+    // Wait until the owner's task page is in flight, then switch accounts.
+    for (let i = 0; i < 200 && !m.client.calls.includes('list_tasks'); i++) {
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    expect(m.client.calls).toContain('list_tasks');
+    m.auth.switchUser(cast.manager);
+    m.client.delayMs = 0;
+    await pending;
+    await settle(60);
+    await new Promise((r) => setTimeout(r, 200));
+    await settle(60);
+    expect(m.root.textContent).not.toContain('SYNTHETIC Inflight task');
+    expect(m.app.state.workspaces.map((w) => w.kind)).toEqual(['stay_eden_ops']);
+    for (const entry of m.app.state.listCache.values()) {
+      expect(JSON.stringify(entry)).not.toContain('SYNTHETIC Inflight task');
+    }
+  });
+
+  it('the same account refreshing its token keeps the screen as it is', async () => {
+    const { p } = await homeTask('Refresh task');
+    const m = mount(cast.owner, { path: `/p/${p.id}` });
+    await m.app.render();
+    await settle();
+    m.client.calls.length = 0;
+    m.auth.emit('TOKEN_REFRESHED', { user: { id: cast.owner.id } });
+    m.auth.emit('SIGNED_IN', { user: { id: cast.owner.id } });
+    await settle();
+    expect(m.root.textContent).toContain('SYNTHETIC Refresh task');
+    expect(m.client.calls).toEqual([]);
+  });
+});
+
+// Review P1-12: sign-out that cannot reach the Auth server.
+describe('sign-out when the server cannot be reached', () => {
+  it('the adapter ends the session on this device when global sign-out fails', async () => {
+    const client = fakeAuthClient({ failGlobalSignOut: true });
+    const auth = createAuth(client, { origin: 'https://example.test' });
+    expect(await auth.getSession()).not.toBeNull();
+    const result = await auth.signOut();
+    expect(result).toEqual({ ok: false, local: true });
+    expect(client.calls).toEqual(['global', 'local']);
+    expect(await auth.getSession()).toBeNull();
+  });
+
+  it('the adapter reports success when global sign-out works', async () => {
+    const client = fakeAuthClient();
+    const auth = createAuth(client, { origin: 'https://example.test' });
+    expect(await auth.signOut()).toEqual({ ok: true });
+    expect(await auth.getSession()).toBeNull();
+  });
+
+  it('the app clears the screen at once and says the other sessions may still be open', async () => {
+    const m = mount(cast.owner, { path: `/w/${cast.ws.home_building}` });
+    await m.app.render();
+    await settle();
+    m.auth.signOutResult = { ok: false, local: true };
+    byText(m.root, 'button', 'Sign out').click();
+    expect(m.root.textContent).not.toContain('Projects');
+    await settle();
+    expect(m.app.state.workspaces).toBeNull();
+    expect(m.root.textContent).toContain('Sign in with Google');
+    expect(m.root.textContent).toMatch(/signed out on this device/i);
+  });
+
+  it('if even this device keeps the session, no data comes back and the person is told', async () => {
+    const m = mount(cast.owner, { path: `/w/${cast.ws.home_building}` });
+    await m.app.render();
+    await settle();
+    m.auth.signOutResult = { ok: false, local: false };
+    m.client.calls.length = 0;
+    byText(m.root, 'button', 'Sign out').click();
+    await settle();
+    expect(m.client.calls).toEqual([]);
+    expect(m.root.textContent).not.toContain('Projects');
+    expect(m.root.textContent).toMatch(/sign-out did not finish/i);
+    expect(byText(m.root, 'button', 'Try signing out again')).toBeTruthy();
   });
 });
 

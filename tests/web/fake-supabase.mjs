@@ -5,10 +5,13 @@
 
 import { asUser } from '../db/harness.mjs';
 
-export function fakeSupabase(db, getUser) {
+export function fakeSupabase(db, getUser, opts = {}) {
   const calls = [];
   const client = {
     calls,
+    // Milliseconds each response takes to arrive after the database answered
+    // (a slow network), settable per test.
+    delayMs: opts.delayMs || 0,
     schema(name) {
       if (name !== 'eden_api') throw new Error('the app must only use the eden_api schema');
       return {
@@ -24,9 +27,11 @@ export function fakeSupabase(db, getUser) {
           try {
             const rows = await asUser(db, user ? user.id : null, (tx) => tx.query(sql, params).then((r) => r.rows),
               { role: user ? 'authenticated' : 'anon' });
+            if (client.delayMs) await new Promise((r) => setTimeout(r, client.delayMs));
             // PostgREST serializes timestamps and dates as strings.
             return { data: JSON.parse(JSON.stringify(rows)), error: null };
           } catch (e) {
+            if (client.delayMs) await new Promise((r) => setTimeout(r, client.delayMs));
             return { data: null, error: { code: e.code, message: e.message } };
           }
         },
@@ -44,12 +49,59 @@ export function fakeAuth(initialUser) {
     signInCalls: 0,
     async getSession() { return user ? { user: { id: user.id } } : null; },
     async signIn() { this.signInCalls += 1; },
+    // When set, signOut returns this result instead of signing out.
+    signOutResult: null,
     async signOut() {
+      if (this.signOutResult) {
+        const r = this.signOutResult;
+        if (r.local) {
+          user = null;
+          for (const l of listeners) l('SIGNED_OUT', null);
+        }
+        return r;
+      }
       user = null;
       for (const l of listeners) l('SIGNED_OUT', null);
+      return { ok: true };
     },
     onChange(fn) { listeners.push(fn); return () => {}; },
     setUser(u) { user = u; },
+    /** Another tab (or the account chooser) signs a different person in on this browser. */
+    switchUser(u) {
+      user = u;
+      for (const l of listeners) l('SIGNED_IN', u ? { user: { id: u.id } } : null);
+    },
+    emit(event, session) {
+      for (const l of listeners) l(event, session);
+    },
+  };
+}
+
+/**
+ * The parts of a supabase-js client that createAuth uses, with a global
+ * sign-out that can fail while the session survives, as the pinned Auth
+ * client does when its sign-out request does not reach the server.
+ */
+export function fakeAuthClient({ failGlobalSignOut = false, failLocalSignOut = false } = {}) {
+  let session = { user: { id: '00000000-0000-4000-8000-00000000c0de' }, access_token: 'SYNTHETIC' };
+  const calls = [];
+  return {
+    calls,
+    auth: {
+      async getSession() { return { data: { session }, error: null }; },
+      async signOut(opts = {}) {
+        const scope = opts.scope || 'global';
+        calls.push(scope);
+        if (scope === 'global' && failGlobalSignOut) {
+          return { error: { name: 'AuthRetryableFetchError', message: 'SYNTHETIC network failure', status: 0 } };
+        }
+        if (scope === 'local' && failLocalSignOut) return { error: { message: 'SYNTHETIC storage failure' } };
+        session = null;
+        return { error: null };
+      },
+      onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
+      async signInWithOAuth() { return { error: null }; },
+    },
   };
 }
 

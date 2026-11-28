@@ -11,8 +11,18 @@ export function signInView(ctx) {
   const btn = h('button', { class: 'primary', type: 'button', onClick: () => ctx.auth.signIn() }, 'Sign in with Google');
   return h('main', { class: 'screen center' },
     h('h1', null, 'Eden HQ'),
+    ctx.state.notice ? h('p', { class: 'notice', role: 'status' }, ctx.state.notice) : null,
     h('p', null, 'Projects and tasks for the family and the Stay Eden team.'),
     btn);
+}
+
+/** Sign-out could not end the session even on this device: show no data. */
+export function signOutFailedView(ctx) {
+  return h('main', { class: 'screen center' },
+    h('h1', null, 'Eden HQ'),
+    h('p', { role: 'alert' },
+      'Sign-out did not finish, and this browser may still be signed in. Nothing from the account is shown. Try again, or close this browser window.'),
+    h('button', { class: 'primary', type: 'button', onClick: () => ctx.signOut() }, 'Try signing out again'));
 }
 
 export function noAccessView(ctx) {

@@ -1,7 +1,9 @@
 // Eden HQ app shell: routing, session, workspace context and data clearing.
 
 import { parseRoute } from './router.js';
-import { signInView, noAccessView, pickerView, unavailableView, errorView, loadingView } from './views/entry.js';
+import {
+  signInView, noAccessView, pickerView, unavailableView, errorView, loadingView, signOutFailedView,
+} from './views/entry.js';
 import { workspaceView } from './views/workspace.js';
 import { projectView } from './views/project.js';
 
@@ -9,15 +11,37 @@ export function createApp({ root, api, auth, win = window, download }) {
   const state = {
     workspaces: null, // my_workspaces() result for the signed-in account
     userKey: null,
+    // Bumped on every account change and sign-out. A result that arrives for
+    // an earlier generation is dropped, never shown or cached (review P0-1).
+    generation: 0,
     listCache: new Map(), // project list/board pages, reused when returning from a task
+    metaCache: new Map(), // project metadata and assignees, same lifetime
     scroll: new Map(),
+    notice: null, // shown on the sign-in screen
+    signOutFailed: false, // the session survived a sign-out on this device
+    flash: null, // a message that must survive the next render (board moves)
   };
   let seq = 0;
 
   function clearData() {
     state.workspaces = null;
-    state.listCache.clear();
+    // New maps, so a request still in flight cannot write into the new ones.
+    state.listCache = new Map();
+    state.metaCache = new Map();
     state.scroll.clear();
+    state.flash = null;
+  }
+
+  /**
+   * The signed-in account changed (or signed out): take the previous
+   * account's screen down now, drop its data and anything still in flight.
+   */
+  function resetIdentity(userKey) {
+    seq += 1;
+    state.generation += 1;
+    clearData();
+    state.userKey = userKey;
+    root.replaceChildren(loadingView());
   }
 
   function currentUrl() {
@@ -32,7 +56,8 @@ export function createApp({ root, api, auth, win = window, download }) {
   }
 
   function invalidate() {
-    state.listCache.clear();
+    state.listCache = new Map();
+    state.metaCache = new Map();
   }
 
   const ctx = {
@@ -42,15 +67,37 @@ export function createApp({ root, api, auth, win = window, download }) {
     workspace(id) {
       return (state.workspaces || []).find((w) => w.workspace_id === id) || null;
     },
+    /** A function that runs `fn` only while the account that asked is still signed in. */
+    current() {
+      const gen = state.generation;
+      return () => gen === state.generation;
+    },
     async signOut() {
-      clearData();
-      await auth.signOut();
+      // The screen and data go first, before the network is involved.
+      resetIdentity(null);
+      state.signOutFailed = true;
+      let result;
+      try {
+        result = await auth.signOut();
+      } catch {
+        result = { ok: false, local: false };
+      }
       win.history.replaceState({}, '', '/');
+      if (result && result.ok === false && !result.local) {
+        // The session is still on this device: show no data from it.
+        seq += 1;
+        root.replaceChildren(signOutFailedView(ctx));
+        return null;
+      }
+      state.signOutFailed = false;
+      state.notice = result && result.ok === false
+        ? 'You are signed out on this device. Eden HQ could not reach the server to end your other sessions; sign out on your other devices too, or sign in and out again later.'
+        : null;
       return render();
     },
     switchWorkspace(id) {
       // Workspace change clears loaded project data.
-      state.listCache.clear();
+      invalidate();
       state.scroll.clear();
       return navigate(`/w/${id}`);
     },
@@ -66,29 +113,40 @@ export function createApp({ root, api, auth, win = window, download }) {
     seq += 1;
     const token = seq;
     const route = parseRoute(win.location.pathname, win.location.search);
+    if (state.signOutFailed) return show(token, signOutFailedView(ctx));
     show(token, loadingView());
 
     const session = await auth.getSession();
+    if (token !== seq) return null;
     if (route.name === 'callback') {
       win.history.replaceState({}, '', '/');
       return render();
     }
     if (!session) {
-      clearData();
+      if (state.userKey !== null || state.workspaces) {
+        resetIdentity(null);
+        return render();
+      }
       return show(token, signInView(ctx));
     }
     const userKey = session.user?.id || 'signed-in';
     if (state.userKey !== userKey) {
-      clearData();
-      state.userKey = userKey;
+      resetIdentity(userKey);
+      state.notice = null;
+      return render();
     }
     if (!state.workspaces) {
+      const stillCurrent = ctx.current();
+      let workspaces;
       try {
-        state.workspaces = await api.myWorkspaces();
+        workspaces = await api.myWorkspaces();
       } catch (e) {
+        if (!stillCurrent() || token !== seq) return null;
         if (e.kind === 'signed_out') return show(token, signInView(ctx));
         return show(token, errorView(ctx, e));
       }
+      if (!stillCurrent() || token !== seq) return null;
+      state.workspaces = workspaces;
     }
     if (!state.workspaces.length) return show(token, noAccessView(ctx));
 
@@ -125,13 +183,35 @@ export function createApp({ root, api, auth, win = window, download }) {
   }
 
   win.addEventListener('popstate', () => render());
-  auth.onChange?.((event) => {
-    if (event === 'SIGNED_OUT' || event === 'USER_UPDATED') {
-      clearData();
+  // Every Auth event names the session it is about. Another tab or the
+  // account chooser can sign someone else in on this browser while a screen
+  // is open, so the incoming account is compared with the rendered one.
+  auth.onChange?.((event, session) => {
+    const id = session?.user?.id || null;
+    if (event === 'SIGNED_OUT' || !id) {
+      state.signOutFailed = false;
+      if (state.userKey !== null || state.workspaces) resetIdentity(null);
       render();
-    } else if (event === 'SIGNED_IN' && !state.workspaces) {
+      return;
+    }
+    if (state.signOutFailed) return; // a sign-out is being retried: show nothing
+    if (state.userKey === null) {
+      // Nothing is rendered for any account yet (first load, sign-in return).
+      if (event !== 'INITIAL_SESSION') render();
+      return;
+    }
+    if (id !== state.userKey) {
+      resetIdentity(id);
+      state.notice = null;
+      render();
+      return;
+    }
+    if (event === 'USER_UPDATED') {
+      invalidate();
+      state.workspaces = null;
       render();
     }
+    // The same account signing in again or refreshing its token: no change.
   });
 
   return { render, ctx, state };

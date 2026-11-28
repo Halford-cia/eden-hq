@@ -115,8 +115,29 @@ export function createAuth(client, { origin }) {
         options: { redirectTo: `${origin}/auth/callback`, scopes: 'openid email profile' },
       });
     },
+    /**
+     * Ends the session everywhere. The Auth client keeps the session when its
+     * global sign-out request fails, so on any failure the session is ended
+     * on this device at least (review P1-12).
+     * Returns { ok: true } or { ok: false, local: <session gone from this device> }.
+     */
     async signOut() {
-      await client.auth.signOut();
+      let res;
+      try {
+        res = await client.auth.signOut();
+      } catch (e) {
+        res = { error: e };
+      }
+      if (!res?.error) return { ok: true };
+      try {
+        await client.auth.signOut({ scope: 'local' });
+      } catch { /* reported below by the session check */ }
+      let still = true;
+      try {
+        const { data } = await client.auth.getSession();
+        still = Boolean(data?.session);
+      } catch { /* assume the session survived */ }
+      return { ok: false, local: !still };
     },
     onChange(fn) {
       const { data } = client.auth.onAuthStateChange((event, session) => fn(event, session));

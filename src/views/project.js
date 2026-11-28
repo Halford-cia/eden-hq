@@ -109,11 +109,14 @@ function filterControls(ctx, route, assignees, urlFor) {
 }
 
 async function loadPage(ctx, key, fetchPage) {
-  let entry = ctx.state.listCache.get(key);
+  // The cache this request belongs to: a sign-in, sign-out or invalidation
+  // replaces the map, so a late answer never lands in the new one.
+  const cache = ctx.state.listCache;
+  let entry = cache.get(key);
   if (!entry) {
     const rows = await fetchPage(null);
     entry = { rows, next: rows.at(-1)?.next_cursor || null };
-    ctx.state.listCache.set(key, entry);
+    cache.set(key, entry);
   }
   return entry;
 }
