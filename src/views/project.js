@@ -9,7 +9,7 @@
 // cached page is shown again (review round 2, P0-1). On a phone the board
 // fetches only the column on screen.
 
-import { h, field, inFlight, moreControl } from '../dom.js';
+import { h, field, inFlight, moreControl, lostAccess } from '../dom.js';
 import { ApiError } from '../api.js';
 import { projectUrl, filtersFromRoute } from '../router.js';
 import { STATUS_LABELS, STATUSES, fmtRange, fmtDate } from '../format.js';
@@ -158,6 +158,7 @@ function projectControls(ctx, project, ops) {
     try {
       await ctx.api.updateProject(project.id, project.version, name.value.trim(), desc.value.trim());
     } catch (err) {
+      if (await lostAccess(ctx, err)) return; // review round 3, P0
       // What was typed stays in the form.
       editMsg.textContent = err.kind === 'conflict'
         ? `Someone else saved this ${noun} first. Reload to see their change; what you typed is still here.`
@@ -192,6 +193,7 @@ function projectControls(ctx, project, ops) {
     try {
       await ctx.api.setProjectArchived(project.id, project.version, !project.archived);
     } catch (err) {
+      if (await lostAccess(ctx, err)) return; // review round 3, P0
       msg.textContent = err.kind === 'conflict'
         ? `Someone else changed this ${noun}. Reload and try again.`
         : err.message;
@@ -366,6 +368,7 @@ function column(ctx, route, project, c, flash) {
           await ctx.api.setTaskStatus(t.id, t.version, to);
           ctx.state.flash = null;
         } catch (err) {
+          if (await lostAccess(ctx, err)) return; // review round 3, P0
           ctx.state.flash = {
             kind: 'board-move',
             projectId: project.id,

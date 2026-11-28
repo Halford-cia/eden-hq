@@ -51,6 +51,19 @@ export function inFlight(fn, controls = () => []) {
 }
 
 /**
+ * For every action's failure (review round 3, P0): an `unavailable` answer
+ * means the database no longer lets this account see what is on screen (a
+ * roster change or a closed gate). The screen is taken down through
+ * ctx.accessLost, which drops every cache and the membership list, and the
+ * next screen asks afresh. Returns true when it did; the caller then stops.
+ */
+export async function lostAccess(ctx, err) {
+  if (err?.kind !== 'unavailable' || !ctx.accessLost) return false;
+  await ctx.accessLost();
+  return true;
+}
+
+/**
  * A "Show more" control (review round 2, P1-6): `load` fetches and paints the
  * next page. While it runs the button is disabled; if it fails, what is on
  * screen stays, and a message beside the button says so and how to retry.
@@ -67,10 +80,7 @@ export function moreControl(ctx, label, load) {
     try {
       await load();
     } catch (e) {
-      if (e?.kind === 'unavailable' && ctx.accessLost) {
-        await ctx.accessLost();
-        return;
-      }
+      if (await lostAccess(ctx, e)) return;
       const why = e?.kind === 'network' || !e?.message
         ? 'Eden HQ could not be reached.'
         : e.message;

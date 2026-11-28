@@ -15,6 +15,7 @@ export function createApp({ root, api, auth, win = window, download }) {
     // an earlier generation is dropped, never shown or cached (review P0-1).
     generation: 0,
     listCache: new Map(), // project list/board pages, reused when returning from a task
+    visitingProject: null, // the project the last render showed; see render()
     metaCache: new Map(), // project metadata and assignees, same lifetime
     scroll: new Map(),
     notice: null, // shown on the sign-in screen
@@ -164,6 +165,13 @@ export function createApp({ root, api, auth, win = window, download }) {
     const token = seq;
     state.onBreakpoint = null;
     const route = parseRoute(win.location.pathname, win.location.search);
+    // Cached task rows serve one visit to a project only: a task and Back, a
+    // filter, a board column. Entering the project from anywhere else (the
+    // Projects screen, a link, the browser's history) reads them again, so a
+    // task finished elsewhere never shows as Ready (review round 3, P1-3).
+    const visiting = route.name === 'project' ? route.projectId : null;
+    if (visiting && visiting !== state.visitingProject) state.listCache = new Map();
+    state.visitingProject = visiting;
     if (state.signOutFailed) return show(token, signOutFailedView(ctx));
     show(token, loadingView());
 

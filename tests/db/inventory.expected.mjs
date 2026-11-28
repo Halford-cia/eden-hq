@@ -192,7 +192,7 @@ export default {
   extensions: [
   ],
   apiResults: [
-    {"name":"add_update(p_task_id uuid, p_body text)","returns":"TABLE(id uuid, created_at timestamp with time zone)"},
+    {"name":"add_update(p_task_id uuid, p_body text)","returns":"TABLE(id uuid, author_name text, body text, created_at timestamp with time zone)"},
     {"name":"create_contact(p_workspace_id uuid, p_display_name text, p_kind text)","returns":"TABLE(id uuid)"},
     {"name":"create_project(p_workspace_id uuid, p_name text, p_description text)","returns":"TABLE(id uuid, version integer)"},
     {"name":"create_task(p_project_id uuid, p_kind text, p_title text, p_description text, p_assignee_user_id uuid, p_assignee_contact_id uuid, p_start_on date, p_due_on date, p_follow_up_on date, p_status text)","returns":"TABLE(id uuid, version integer)"},

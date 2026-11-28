@@ -1,7 +1,7 @@
 // Task detail: edit and save, conflicts, updates thread, archive (owners),
 // and the new-task form. Failed saves keep what the person typed.
 
-import { h, field, inFlight, moreControl } from '../dom.js';
+import { h, field, inFlight, moreControl, lostAccess } from '../dom.js';
 import { projectUrl } from '../router.js';
 import {
   STATUS_LABELS, STATUSES, OPS_KINDS, assigneeValue, assigneeFromValue, fmtDate,
@@ -130,6 +130,9 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl, t
       ctx.invalidate();
       await ctx.render();
     } catch (err) {
+      // Access is gone: the task, its thread and this form leave the screen,
+      // and the next screen reads memberships afresh (review round 3, P0).
+      if (await lostAccess(ctx, err)) return;
       if (err.kind === 'conflict') {
         showConflict(d);
       } else {
@@ -149,6 +152,7 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl, t
         ctx.invalidate();
         await ctx.render();
       } catch (err) {
+        if (await lostAccess(ctx, err)) return;
         if (err.kind === 'conflict') {
           msg.replaceChildren(h('p', { class: 'error' }, 'It changed again. Reload and try once more.'));
         } else {
@@ -197,6 +201,7 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl, t
       try {
         await ctx.api.setTaskArchived(task.id, task.version, !task.archived);
       } catch (err) {
+        if (await lostAccess(ctx, err)) return;
         msg.replaceChildren(h('p', { class: 'error' }, err.kind === 'conflict'
           ? 'Someone else changed this task. Reload and try again.' : err.message));
         return;
@@ -249,11 +254,15 @@ function contactAdder(ctx, ws, select) {
     }
     try {
       const c = await ctx.api.createContact(ws.workspace_id, name.value.trim(), kind.value);
+      // The name is recorded whether or not this task is saved: the next
+      // form reads the workspace's assignees again (review round 3, P2-2).
+      ctx.state.metaCache.delete(`assignees|${ws.workspace_id}`);
       const opt = h('option', { value: `contact:${c.id}`, selected: true }, name.value.trim());
       select.insertBefore(opt, select.lastChild);
       select.value = `contact:${c.id}`;
       box.hidden = true;
     } catch (err) {
+      if (await lostAccess(ctx, err)) return;
       msg.textContent = err.message;
     }
   }, () => [addBtn]);
@@ -269,13 +278,31 @@ function contactAdder(ctx, ws, select) {
 
 function updatesThread(ctx, task, readOnly) {
   const list = h('ol', { class: 'updates', 'aria-label': 'Updates' });
+  // Entries posted here while older pages are still unread (review round 3,
+  // P1-4). Each moves into its place in `list` when Show more reaches it.
+  const recent = h('ol', { class: 'updates recent', 'aria-label': 'Just posted' });
+  const recentItems = new Map(); // update id -> its <li> in `recent`
+  const shown = new Set(); // update ids in `list`
   let next = task.updates_next;
   const more = h('div', { class: 'more' });
+  const entry = (u) => h('li', null,
+    h('p', { class: 'muted' }, `${u.author_name || 'Former member'} · ${fmtDate(String(u.created_at).slice(0, 10))}`),
+    h('p', { class: 'body' }, u.body));
   const paint = (items) => {
     for (const u of items) {
-      list.append(h('li', null,
-        h('p', { class: 'muted' }, `${u.author_name || 'Former member'} · ${fmtDate(String(u.created_at).slice(0, 10))}`),
-        h('p', { class: 'body' }, u.body)));
+      if (recentItems.has(u.id)) {
+        list.append(recentItems.get(u.id));
+        recentItems.delete(u.id);
+        shown.add(u.id);
+      } else if (!shown.has(u.id)) {
+        shown.add(u.id);
+        list.append(entry(u));
+      }
+    }
+    if (!next) {
+      // The whole thread is read: anything still waiting is the newest.
+      for (const li of recentItems.values()) list.append(li);
+      recentItems.clear();
     }
     more.replaceChildren(...(next ? moreControl(ctx, 'Show more updates', async () => {
       const stillCurrent = ctx.current();
@@ -291,8 +318,11 @@ function updatesThread(ctx, task, readOnly) {
   const body = h('textarea', { rows: 2, maxlength: 4000 });
   const msg = h('p', { class: 'error', role: 'alert' });
   const postBtn = h('button', { type: 'submit' }, 'Post update');
-  // Posting refreshes this thread only: the task form above, and anything
+  // Posting touches this thread only: the task form above, and anything
   // typed into it, is left alone (review P1-5). One post per tap (P1-7).
+  // The write returns the saved entry (id, author, body, time), which is
+  // shown at once; nothing is read back, and the loaded pages and the Show
+  // more cursor stay as they were (review round 3, P1-4).
   const post = inFlight(async () => {
     msg.textContent = '';
     if (!body.value.trim()) return;
@@ -301,30 +331,22 @@ function updatesThread(ctx, task, readOnly) {
     try {
       posted = await ctx.api.addUpdate(task.id, body.value.trim());
     } catch (err) {
+      // Access is gone: take the task and its thread down (review round 3, P0).
+      if (await lostAccess(ctx, err)) return;
       msg.textContent = err.message;
       return;
     }
     if (!stillCurrent()) return;
     body.value = '';
-    // Reload the thread far enough to show everything that was on screen
-    // plus the new entry (the oldest come first), so a long, expanded
-    // thread does not shrink and hide what was just posted (review round 2, P2).
-    const shown = list.querySelectorAll('li:not(.empty)').length;
-    try {
-      let rows = [];
-      let cursor = null;
-      for (let pages = 0; pages < 40; pages++) {
-        const page = await ctx.api.listUpdates(task.id, cursor);
-        rows = rows.concat(page);
-        cursor = page.at(-1)?.next_cursor || null;
-        if (!cursor || (rows.length > shown && rows.some((u) => u.id === posted.id))) break;
-      }
-      if (!stillCurrent()) return;
-      next = cursor;
-      list.replaceChildren();
-      paint(rows);
-    } catch (err) {
-      msg.textContent = `Your update was posted. ${err.message}`;
+    list.querySelector('li.empty')?.remove();
+    const li = entry(posted);
+    if (next) {
+      // Older entries are still unread: the new one waits after Show more.
+      recentItems.set(posted.id, li);
+      recent.append(li);
+    } else {
+      shown.add(posted.id);
+      list.append(li);
     }
   }, () => [postBtn]);
   const form = readOnly ? null : h('form', {
@@ -333,5 +355,5 @@ function updatesThread(ctx, task, readOnly) {
       post();
     },
   }, field('Add update', body), msg, postBtn);
-  return h('section', { class: 'thread' }, h('h3', null, 'Updates'), list, more, form);
+  return h('section', { class: 'thread' }, h('h3', null, 'Updates'), list, more, recent, form);
 }

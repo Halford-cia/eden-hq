@@ -1,6 +1,6 @@
 // Workspace home: the project (or property) list, and New project for owners.
 
-import { h, field, inFlight, moreControl } from '../dom.js';
+import { h, field, inFlight, moreControl, lostAccess } from '../dom.js';
 import { topBar } from './entry.js';
 
 export async function workspaceView(ctx, route) {
@@ -57,6 +57,7 @@ export async function workspaceView(ctx, route) {
       try {
         p = await ctx.api.createProject(ws.workspace_id, name.value.trim(), desc.value.trim());
       } catch (err) {
+        if (await lostAccess(ctx, err)) return; // review round 3, P0
         msg.textContent = err.message;
         return;
       }
