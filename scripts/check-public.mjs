@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-// npm run check:public [-- --ci] [--base <ref>] [--repo <dir>]
+// npm run check:public [-- --ci] [--base <ref> --head <ref>] [--repo <dir>]
+// node scripts/check-public.mjs --pre-push <remote>   (the pre-push hook; refs on stdin)
 //
-// This repository is public. Reviews every outgoing commit between the remote
-// base and HEAD (not only the final tree) and fails on: environment files
+// This repository is public. Reviews every outgoing commit (not only the
+// final tree): in the hook, the commits the push sends; in CI, the event's
+// base..head; otherwise the merge base with origin/main up to HEAD. Every
+// changed file is inspected, or the scan fails. It fails on: environment files
 // other than .env.example; roster, backup, dump, export or archive files;
 // CSV/JSON/SQL data outside fixtures/ and images outside fixtures/images/;
 // fixture files without a SYNTHETIC marker; key-shaped values; and any entry
@@ -58,15 +61,92 @@ function loadDenyList() {
     .filter((l) => l && !l.startsWith('#')).map((l) => l.toLowerCase());
 }
 
-function baseRef() {
+const ZERO = /^0+$/;
+const revList = (...a) => gitText('rev-list', '--reverse', ...a).split('\n').filter(Boolean);
+
+function objectExists(sha) {
+  try {
+    git('cat-file', '-e', `${sha}^{commit}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The commits leaving this machine (review P1-10).
+ *   --pre-push <remote>: Git's list of outgoing refs on stdin
+ *     (`<local ref> <local sha> <remote ref> <remote sha>` per line); every
+ *     commit reachable from a pushed sha that the remote does not have.
+ *   --base <sha> --head <sha> (CI: the event's SHAs): base..head; an all-zero
+ *     base (a first push) means the whole history of head.
+ *   Otherwise: the merge base with origin/main up to HEAD.
+ */
+function outgoingCommits() {
+  const prePush = args.indexOf('--pre-push');
+  if (prePush >= 0) {
+    const remote = args[prePush + 1];
+    if (!remote || remote.startsWith('--')) {
+      console.error('check:public: --pre-push needs the remote name (the hook passes "$1").');
+      process.exit(2);
+    }
+    const input = readFileSync(0, 'utf8');
+    const seen = new Set();
+    const commits = [];
+    for (const line of input.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      const [, localSha, , remoteSha] = line.split(/\s+/);
+      if (!localSha || ZERO.test(localSha)) continue; // a deletion sends no commits
+      const not = ['--not', `--remotes=${remote}`];
+      if (remoteSha && !ZERO.test(remoteSha) && objectExists(remoteSha)) not.push(remoteSha);
+      for (const c of revList(localSha, ...not)) {
+        if (!seen.has(c)) {
+          seen.add(c);
+          commits.push(c);
+        }
+      }
+    }
+    return commits;
+  }
+  const head = opt('--head') || process.env.EDEN_PUBLIC_HEAD || 'HEAD';
   const explicit = opt('--base') || process.env.EDEN_PUBLIC_BASE;
-  if (explicit) return gitText('merge-base', explicit, 'HEAD');
+  if (explicit && ZERO.test(explicit)) return revList(head);
+  if (explicit) return revList(`${gitText('merge-base', explicit, head)}..${head}`);
   for (const ref of ['origin/main', 'origin/HEAD']) {
     try {
-      return gitText('merge-base', ref, 'HEAD');
+      return revList(`${gitText('merge-base', ref, head)}..${head}`);
     } catch { /* try next */ }
   }
-  return null; // no remote base: review every commit
+  return revList(head); // no remote base: review every commit
+}
+
+/**
+ * The files a commit adds or changes, read NUL-delimited so no name is
+ * quoted or split (review P1-11). Merges are compared with each parent.
+ */
+function changedEntries(commit) {
+  const out = git('diff-tree', '-z', '-r', '-m', '--no-commit-id', '--root', '-M', '--raw', commit)
+    .toString('utf8').split('\0');
+  const entries = [];
+  for (let i = 0; i < out.length; i++) {
+    const meta = out[i];
+    if (!meta.startsWith(':')) continue;
+    const [, newMode, , newSha, status] = meta.slice(1).split(' ');
+    const kind = status[0];
+    const paths = kind === 'R' || kind === 'C' ? [out[i + 1], out[i + 2]] : [out[i + 1]];
+    i += paths.length;
+    if (kind === 'D') continue;
+    entries.push({ path: paths[paths.length - 1], allPaths: paths, mode: newMode, sha: newSha });
+  }
+  return entries;
+}
+
+const WITHHELD = '<file name withheld: deny-listed term>';
+
+/** A path as it may appear in a report: withheld if any name holds a private term. */
+function displayPath(paths, denyList) {
+  if (paths.some((p) => denyList.some((d) => p.toLowerCase().includes(d)))) return WITHHELD;
+  // Control characters are shown escaped so a name cannot forge report lines.
+  return paths[paths.length - 1].replace(/[\u0000-\u001f\u007f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`);
 }
 
 function isBinary(buf) {
@@ -109,10 +189,12 @@ export function contentFindings(path, buf, denyList) {
 
 function main() {
   const denyList = loadDenyList();
-  const base = baseRef();
-  const range = base ? [`${base}..HEAD`] : ['HEAD'];
-  const commits = gitText('rev-list', '--reverse', ...range).split('\n').filter(Boolean);
+  const commits = outgoingCommits();
   const problems = [];
+  if (ci && !commits.length) {
+    console.error('check:public FAILED: no commits in the range, so nothing was reviewed. Pass the event\'s base and head SHAs (--base, --head).');
+    process.exit(1);
+  }
 
   for (const c of commits) {
     const short = c.slice(0, 10);
@@ -120,22 +202,29 @@ function main() {
     for (const f of keyShapedFindings(message)) problems.push(`${short} · commit message · key-shaped value: ${f}`);
     if (denyList.some((d) => message.toLowerCase().includes(d))) problems.push(`${short} · commit message · deny-listed term`);
 
-    const entries = gitText('diff-tree', '--no-commit-id', '--root', '-r', '-M', '--name-status', c)
-      .split('\n').filter(Boolean);
-    for (const line of entries) {
-      const parts = line.split('\t');
-      const status = parts[0][0];
-      if (status === 'D') continue;
-      const path = parts[parts.length - 1];
-      const rules = [...pathFindings(path)];
-      let buf;
-      try {
-        buf = git('show', `${c}:${path}`);
-      } catch {
-        continue; // submodule or unreadable entry
+    for (const entry of changedEntries(c)) {
+      // Formatting a finding never uses a name that holds a private term (review P0-4).
+      const shown = displayPath(entry.allPaths, denyList);
+      const rules = [];
+      if (entry.allPaths.some((p) => denyList.some((d) => p.toLowerCase().includes(d)))) {
+        rules.push('deny-listed term in the file name');
       }
-      rules.push(...contentFindings(path, buf, denyList));
-      for (const r of rules) problems.push(`${short} · ${path} · ${r}`);
+      rules.push(...pathFindings(entry.path));
+      if (entry.mode === '160000') {
+        rules.push('entry could not be inspected (a submodule link); the scan cannot pass');
+      } else {
+        let buf = null;
+        try {
+          buf = git('cat-file', 'blob', entry.sha);
+        } catch {
+          rules.push('entry could not be inspected (its contents could not be read); the scan cannot pass');
+        }
+        if (buf) {
+          rules.push(...contentFindings(entry.path, buf, denyList)
+            .filter((r) => r !== 'deny-listed term in the file name'));
+        }
+      }
+      for (const r of rules) problems.push(`${short} · ${shown} · ${r}`);
     }
   }
 

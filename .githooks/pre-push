@@ -2,4 +2,6 @@
 # Runs check:public with the private deny-list before anything leaves this
 # machine (a pushed commit is already public). Enable once per clone:
 #   git config core.hooksPath .githooks
-exec npm run --silent check:public
+# Git passes the remote name as $1 and the outgoing refs on stdin; the script
+# reviews exactly the commits this push sends, whatever is checked out.
+exec node "$(git rev-parse --show-toplevel)/scripts/check-public.mjs" --pre-push "$1"
