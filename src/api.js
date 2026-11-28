@@ -81,6 +81,15 @@ export function createApi(client) {
     listAssignees: (workspaceId) => call('list_assignees', { p_workspace_id: workspaceId }),
     createContact: (workspaceId, displayName, kind) =>
       one('create_contact', { p_workspace_id: workspaceId, p_display_name: displayName, p_kind: kind }),
+    // Owners correct or retire recorded names (review round 2, P1-5).
+    listContacts: (workspaceId, { archived = false, after = null, pageSize = 50 } = {}) =>
+      call('list_contacts', {
+        p_workspace_id: workspaceId, p_archived: archived, p_after: after, p_page_size: pageSize,
+      }),
+    updateContact: (contactId, displayName, kind) =>
+      one('update_contact', { p_contact_id: contactId, p_display_name: displayName, p_kind: kind }),
+    setContactArchived: (contactId, archived) =>
+      one('set_contact_archived', { p_contact_id: contactId, p_archived: archived }),
     listTasks: (projectId, filters = {}, { after = null, pageSize = 50 } = {}) =>
       call('list_tasks', { p_project_id: projectId, p_filters: filters, p_after: after, p_page_size: pageSize }),
     getTask: (taskId) => one('get_task', { p_task_id: taskId }),

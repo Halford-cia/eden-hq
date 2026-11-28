@@ -150,6 +150,11 @@ describe('account change on an open tab', () => {
     // The manager gets the same answer as a fresh request: not available.
     expect(m.root.textContent).toContain('Not available');
     expect(m.root.textContent).not.toContain('SYNTHETIC Switch task');
+    // The refusal dropped every cached membership (review round 2, P0-1);
+    // the next screen reads the manager's afresh.
+    expect(m.app.state.workspaces).toBeNull();
+    await m.app.ctx.navigate('/');
+    await settle();
     expect(m.app.state.workspaces.map((w) => w.kind)).toEqual(['stay_eden_ops']);
   });
 
@@ -170,7 +175,8 @@ describe('account change on an open tab', () => {
     await new Promise((r) => setTimeout(r, 200));
     await settle(60);
     expect(m.root.textContent).not.toContain('SYNTHETIC Inflight task');
-    expect(m.app.state.workspaces.map((w) => w.kind)).toEqual(['stay_eden_ops']);
+    // The manager's refusal dropped the cached memberships (review round 2, P0-1).
+    expect(m.app.state.workspaces).toBeNull();
     for (const entry of m.app.state.listCache.values()) {
       expect(JSON.stringify(entry)).not.toContain('SYNTHETIC Inflight task');
     }

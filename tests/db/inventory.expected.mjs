@@ -4,12 +4,17 @@
 
 export default {
   schemaUsage: [
+    {"schema":"auth","grantee":"anon","privilege":"USAGE"},
+    {"schema":"auth","grantee":"authenticated","privilege":"USAGE"},
     {"schema":"eden","grantee":"authenticated","privilege":"USAGE"},
     {"schema":"eden_api","grantee":"authenticated","privilege":"USAGE"},
     {"schema":"eden_private","grantee":"authenticated","privilege":"USAGE"},
-    {"schema":"public","grantee":"PUBLIC","privilege":"USAGE"},
+    {"schema":"graphql","grantee":"anon","privilege":"USAGE"},
+    {"schema":"graphql","grantee":"authenticated","privilege":"USAGE"},
     {"schema":"public","grantee":"anon","privilege":"USAGE"},
     {"schema":"public","grantee":"authenticated","privilege":"USAGE"},
+    {"schema":"storage","grantee":"anon","privilege":"USAGE"},
+    {"schema":"storage","grantee":"authenticated","privilege":"USAGE"},
   ],
   relations: [
   ],
@@ -112,6 +117,8 @@ export default {
     {"schema":"eden","name":"workspaces","column":"time_zone","grantee":"authenticated","privilege":"SELECT"},
   ],
   functions: [
+    {"schema":"auth","name":"uid()","grantee":"anon","privilege":"EXECUTE"},
+    {"schema":"auth","name":"uid()","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"add_update(p_task_id uuid, p_body text)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"create_contact(p_workspace_id uuid, p_display_name text, p_kind text)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"create_project(p_workspace_id uuid, p_name text, p_description text)","grantee":"authenticated","privilege":"EXECUTE"},
@@ -120,6 +127,7 @@ export default {
     {"schema":"eden_api","name":"get_project(p_project_id uuid)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"get_task(p_task_id uuid)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"list_assignees(p_workspace_id uuid)","grantee":"authenticated","privilege":"EXECUTE"},
+    {"schema":"eden_api","name":"list_contacts(p_workspace_id uuid, p_archived boolean, p_after text, p_page_size integer)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"list_projects(p_workspace_id uuid, p_include_archived boolean, p_after text, p_page_size integer)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"list_tasks(p_project_id uuid, p_filters jsonb, p_after text, p_page_size integer)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"list_updates(p_task_id uuid, p_after text, p_page_size integer)","grantee":"authenticated","privilege":"EXECUTE"},
@@ -128,6 +136,7 @@ export default {
     {"schema":"eden_api","name":"set_project_archived(p_project_id uuid, p_expected_version integer, p_archived boolean)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"set_task_archived(p_task_id uuid, p_expected_version integer, p_archived boolean)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"set_task_status(p_task_id uuid, p_expected_version integer, p_status text)","grantee":"authenticated","privilege":"EXECUTE"},
+    {"schema":"eden_api","name":"update_contact(p_contact_id uuid, p_display_name text, p_kind text)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"update_project(p_project_id uuid, p_expected_version integer, p_name text, p_description text)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_api","name":"update_task(p_task_id uuid, p_expected_version integer, p_changes jsonb)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_private","name":"caller_id()","grantee":"authenticated","privilege":"EXECUTE"},
@@ -141,6 +150,8 @@ export default {
     {"schema":"eden_private","name":"require_access(p_workspace_id uuid, p_need_owner boolean)","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_private","name":"unavailable()","grantee":"authenticated","privilege":"EXECUTE"},
     {"schema":"eden_private","name":"workspace_kind(p_workspace_id uuid)","grantee":"authenticated","privilege":"EXECUTE"},
+  ],
+  apiRoleMemberships: [
   ],
   rls: [
     {"schema":"eden","name":"outside_contacts","rls":true},
@@ -189,6 +200,7 @@ export default {
     {"name":"get_project(p_project_id uuid)","returns":"TABLE(id uuid, workspace_id uuid, workspace_kind text, workspace_name text, name text, description text, archived boolean, version integer, created_at timestamp with time zone)"},
     {"name":"get_task(p_task_id uuid)","returns":"TABLE(id uuid, workspace_id uuid, workspace_kind text, project_id uuid, project_name text, kind text, title text, description text, status text, start_on date, due_on date, follow_up_on date, assignee_kind text, assignee_id uuid, assignee_name text, archived boolean, created_by_name text, created_at timestamp with time zone, updated_at timestamp with time zone, version integer, updates jsonb, updates_next text)"},
     {"name":"list_assignees(p_workspace_id uuid)","returns":"TABLE(assignee_kind text, id uuid, display_name text, contact_kind text)"},
+    {"name":"list_contacts(p_workspace_id uuid, p_archived boolean, p_after text, p_page_size integer)","returns":"TABLE(id uuid, display_name text, kind text, archived boolean, created_at timestamp with time zone, next_cursor text)"},
     {"name":"list_projects(p_workspace_id uuid, p_include_archived boolean, p_after text, p_page_size integer)","returns":"TABLE(id uuid, name text, description text, archived boolean, open_count bigint, version integer, created_at timestamp with time zone, next_cursor text)"},
     {"name":"list_tasks(p_project_id uuid, p_filters jsonb, p_after text, p_page_size integer)","returns":"TABLE(id uuid, project_id uuid, kind text, title text, status text, start_on date, due_on date, follow_up_on date, assignee_kind text, assignee_id uuid, assignee_name text, archived boolean, version integer, updated_at timestamp with time zone, next_cursor text)"},
     {"name":"list_updates(p_task_id uuid, p_after text, p_page_size integer)","returns":"TABLE(id uuid, author_name text, body text, created_at timestamp with time zone, next_cursor text)"},
@@ -197,6 +209,7 @@ export default {
     {"name":"set_project_archived(p_project_id uuid, p_expected_version integer, p_archived boolean)","returns":"TABLE(id uuid, version integer)"},
     {"name":"set_task_archived(p_task_id uuid, p_expected_version integer, p_archived boolean)","returns":"TABLE(id uuid, version integer)"},
     {"name":"set_task_status(p_task_id uuid, p_expected_version integer, p_status text)","returns":"TABLE(id uuid, version integer)"},
+    {"name":"update_contact(p_contact_id uuid, p_display_name text, p_kind text)","returns":"TABLE(id uuid)"},
     {"name":"update_project(p_project_id uuid, p_expected_version integer, p_name text, p_description text)","returns":"TABLE(id uuid, version integer)"},
     {"name":"update_task(p_task_id uuid, p_expected_version integer, p_changes jsonb)","returns":"TABLE(id uuid, version integer)"},
   ],

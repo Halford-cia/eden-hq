@@ -2,12 +2,15 @@
 // to review (docs/SPEC.md, "Checks that apply to every stage").
 
 const EDEN_SCHEMAS = ['eden', 'eden_private', 'eden_api'];
-// Schemas whose objects are checked for exposure to the API roles. `auth` and
-// `storage` belong to Supabase and are covered by the storage-policy and
-// realtime items instead.
-const SCOPED_SCHEMAS = [...EDEN_SCHEMAS, 'public'];
 const API_ROLES = ['anon', 'authenticated'];
 const DEFINER_ROLES = ['eden_membership_reader', 'eden_receipt_verifier', 'eden_audit_writer'];
+
+// Every schema except PostgreSQL's own catalogs (review round 2, P0-3): a
+// fixed list of schema names let an app-readable view in a new schema pass.
+// Platform schemas (auth, storage, public, …) are inventoried like Eden's;
+// their reviewed objects are the baseline in inventory.expected.mjs.
+const USER_SCHEMA = `n.nspname not in ('pg_catalog', 'information_schema')
+      and n.nspname !~ '^pg_(toast|temp_|toast_temp_)'`;
 
 const sortRows = (rows) =>
   rows.map((r) => JSON.stringify(r)).sort().map((s) => JSON.parse(s));
@@ -15,47 +18,72 @@ const sortRows = (rows) =>
 export async function collectInventory(db) {
   const q = async (sql, params) => sortRows((await db.query(sql, params)).rows);
 
-  const grantee = `case when a.grantee = 0 then 'PUBLIC' else r.rolname end`;
+  // Effective access, as PostgreSQL decides it for each app role: direct
+  // grants, grants to PUBLIC and grants inherited through role membership
+  // (review round 2, P0-3). A role an app role may SET ROLE to without
+  // inheriting is listed in apiRoleMemberships.
+  const version = Number((await db.query('show server_version_num')).rows[0].server_version_num);
+  const tablePrivs = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
+  if (version >= 170000) tablePrivs.push('MAINTAIN');
 
   const schemaUsage = await q(`
-    select n.nspname as schema, ${grantee} as grantee, a.privilege_type as privilege
+    select n.nspname as schema, r.role as grantee, pr.p as privilege
     from pg_namespace n
-    cross join lateral aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
-    left join pg_roles r on r.oid = a.grantee
-    where n.nspname = any($1)
-      and (a.grantee = 0 or r.rolname = any($2))`, [SCOPED_SCHEMAS, API_ROLES]);
+    cross join unnest($1::text[]) as r(role)
+    cross join (values ('USAGE'), ('CREATE')) as pr(p)
+    where ${USER_SCHEMA}
+      and has_schema_privilege(r.role, n.oid, pr.p)`, [API_ROLES]);
 
   const relations = await q(`
     select n.nspname as schema, c.relname as name, c.relkind::text as kind,
-           ${grantee} as grantee, a.privilege_type as privilege
+           r.role as grantee, pr.p as privilege
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
-    cross join lateral aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-    left join pg_roles r on r.oid = a.grantee
-    where n.nspname = any($1) and c.relkind in ('r', 'v', 'm', 'S', 'f', 'p')
-      and (a.grantee = 0 or r.rolname = any($2))`, [SCOPED_SCHEMAS, API_ROLES]);
+    cross join unnest($1::text[]) as r(role)
+    cross join lateral (
+      select p from unnest(case when c.relkind = 'S' then array['USAGE', 'SELECT', 'UPDATE'] else $2::text[] end) as p
+    ) as pr
+    where ${USER_SCHEMA} and c.relkind in ('r', 'v', 'm', 'S', 'f', 'p')
+      and case when c.relkind = 'S' then has_sequence_privilege(r.role, c.oid, pr.p)
+               else has_table_privilege(r.role, c.oid, pr.p) end`, [API_ROLES, tablePrivs]);
 
+  // Column-level access that the relation-level rows above do not already cover.
   const columns = await q(`
     select n.nspname as schema, c.relname as name, att.attname as column,
-           ${grantee} as grantee, a.privilege_type as privilege
+           r.role as grantee, pr.p as privilege
     from pg_attribute att
     join pg_class c on c.oid = att.attrelid
     join pg_namespace n on n.oid = c.relnamespace
-    cross join lateral aclexplode(att.attacl) a
-    left join pg_roles r on r.oid = a.grantee
-    where n.nspname = any($1) and att.attnum > 0 and not att.attisdropped
-      and att.attacl is not null
-      and (a.grantee = 0 or r.rolname = any($2))`, [SCOPED_SCHEMAS, API_ROLES]);
+    cross join unnest($1::text[]) as r(role)
+    cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) as pr(p)
+    where ${USER_SCHEMA} and c.relkind in ('r', 'v', 'm', 'f', 'p')
+      and att.attnum > 0 and not att.attisdropped
+      and has_column_privilege(r.role, c.oid, att.attnum, pr.p)
+      and not has_table_privilege(r.role, c.oid, pr.p)`, [API_ROLES]);
 
   const functions = await q(`
     select n.nspname as schema, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' as name,
-           ${grantee} as grantee, a.privilege_type as privilege
+           r.role as grantee, 'EXECUTE' as privilege
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
-    cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-    left join pg_roles r on r.oid = a.grantee
-    where n.nspname = any($1)
-      and (a.grantee = 0 or r.rolname = any($2))`, [SCOPED_SCHEMAS, API_ROLES]);
+    cross join unnest($1::text[]) as r(role)
+    where ${USER_SCHEMA}
+      and has_function_privilege(r.role, p.oid, 'EXECUTE')`, [API_ROLES]);
+
+  // Roles an app role belongs to, directly or through another role: their
+  // privileges are reachable by inheritance or by SET ROLE.
+  const apiRoleMemberships = await q(`
+    with recursive m(member, roleid, inherit, set) as (
+      select r.rolname::text, am.roleid, am.inherit_option, am.set_option
+      from pg_auth_members am join pg_roles r on r.oid = am.member
+      where r.rolname = any($1)
+      union
+      select m.member, am.roleid, m.inherit and am.inherit_option, m.set and am.set_option
+      from m join pg_auth_members am on am.member = m.roleid
+    )
+    select m.member, g.rolname as role, bool_or(m.inherit) as inherit, bool_or(m.set) as set
+    from m join pg_roles g on g.oid = m.roleid
+    group by m.member, g.rolname`, [API_ROLES]);
 
   const rls = await q(`
     select n.nspname as schema, c.relname as name, c.relrowsecurity as rls
@@ -136,7 +164,7 @@ export async function collectInventory(db) {
     from pg_policies where schemaname = any($1)`, [EDEN_SCHEMAS]);
 
   return {
-    schemaUsage, relations, columns, functions, rls, realtime, storagePolicies,
+    schemaUsage, relations, columns, functions, apiRoleMemberships, rls, realtime, storagePolicies,
     definers, definerRoleGrants, definerRolePolicies, definerRoleAttributes, extensions,
     apiResults, policies,
   };

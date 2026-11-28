@@ -212,15 +212,16 @@ describe('requests needed to display a phone board', () => {
     expect(m.client.calls.sort()).toEqual(['get_project', 'list_assignees', 'list_tasks']);
     const visible = m.root.querySelector('.col[data-status="ready"]');
     expect(visible.querySelectorAll('.card').length).toBe(50);
-    // Next column: one request for that column only.
+    // Next column: one request for that column, plus the project as the
+    // current access check (review round 2, P0-1).
     m.client.calls.length = 0;
     byText(m.root, 'button', 'Next column').click();
     await settle();
-    expect(m.client.calls).toEqual(['list_tasks']);
+    expect(m.client.calls.sort()).toEqual(['get_project', 'list_tasks']);
     expect(m.root.querySelector('.col[data-status="in_progress"]').querySelectorAll('.card').length).toBe(50);
   });
 
-  it('at 375 px a cold task link on the board takes four requests, and Back none', async () => {
+  it('at 375 px a cold task link on the board takes four requests, and Back only the access check', async () => {
     window.happyDOM.setViewport({ width: 375, height: 800 });
     const pid = await seed(60);
     const [first] = await asUser(db, cast.owner.id, (tx) => rpc(tx, 'list_tasks', { p_project_id: pid }));
@@ -233,7 +234,9 @@ describe('requests needed to display a phone board', () => {
     m.client.calls.length = 0;
     byText(m.root.querySelector('aside'), 'a', '‹ SYNTHETIC Phone 60').click();
     await settle();
-    expect(m.client.calls).toEqual([]);
+    // Back repaints the cached column only after a current access decision
+    // (review round 2, P0-1): one request, no task page.
+    expect(m.client.calls).toEqual(['get_project']);
   });
 
   it('at desktop width all three columns load, with metadata fetched once', async () => {

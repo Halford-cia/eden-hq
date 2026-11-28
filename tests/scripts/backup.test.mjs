@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  freshDb, seedCast, asUser, rpc, MIGRATOR, setGate, repoRoot,
+  freshDb, seedCast, asUser, rpc, MIGRATOR, setGate, repoRoot, migrationFiles,
 } from '../db/harness.mjs';
 import {
   setTimestamp, setObjectNames, snapshotFacts, buildManifest, verifyRestore, closeSuperseded,
@@ -81,7 +81,8 @@ describe('snapshot facts, manifest and restore:verify', () => {
     ]);
     expect(facts.tables['eden.workspaces']).toBe(2);
     expect(facts.tables['eden.tasks']).toBe(1);
-    expect(facts.migrations).toEqual(['20261127000100', '20261127000200']);
+    expect(facts.migrations).toEqual(migrationFiles().map((f) => f.split('_')[0]));
+    expect(facts.migrations).toContain('20261128000100');
     expect(facts.auth.users).toBe(7);
   });
 

@@ -2,12 +2,14 @@
 // task detail beside the view on desktop and full screen on a phone.
 //
 // Requests (review P1-8): the project, the visible tasks and an opened task
-// are fetched together; assignees follow once the workspace is known. Project
-// metadata and assignees are cached with the page cache, which an account
-// change, a workspace switch or any save replaces. On a phone the board
+// are fetched together; assignees follow once the workspace is known.
+// Assignees and task pages are cached, which an account change, a workspace
+// switch, any save or any `unavailable` answer replaces. The project itself
+// is fetched on every visit: it is the access check that must pass before a
+// cached page is shown again (review round 2, P0-1). On a phone the board
 // fetches only the column on screen.
 
-import { h, field, inFlight } from '../dom.js';
+import { h, field, inFlight, moreControl } from '../dom.js';
 import { ApiError } from '../api.js';
 import { projectUrl, filtersFromRoute } from '../router.js';
 import { STATUS_LABELS, STATUSES, fmtRange, fmtDate } from '../format.js';
@@ -30,8 +32,12 @@ export async function projectView(ctx, route) {
   const urlFor = (extra) => projectUrl(route.projectId, { ...route, task: null, ...extra });
   const wantTask = route.task && route.task !== 'new';
 
+  // The project is always asked for afresh: it is the current access
+  // decision. Cached pages are painted only once it answers, so a roster
+  // change or a closed gate since the last visit shows nothing from memory
+  // (review round 2, P0-1).
   const [project, work, openTask] = await Promise.all([
-    cached(ctx, `project|${route.projectId}`, () => ctx.api.getProject(route.projectId)),
+    ctx.api.getProject(route.projectId),
     route.view === 'board'
       ? boardColumns(ctx, route, filters, phone)
       : listEntry(ctx, route, filters),
@@ -43,9 +49,31 @@ export async function projectView(ctx, route) {
   const isOwner = ws.role === 'owner';
   const assignees = await cached(ctx, `assignees|${ws.workspace_id}`, () => ctx.api.listAssignees(ws.workspace_id));
 
-  const workNode = route.view === 'board'
-    ? boardSection(ctx, route, project, work, urlFor)
-    : listSection(ctx, route, project, filters, work);
+  const workSlot = h('div', { class: 'work-slot' },
+    route.view === 'board'
+      ? boardSection(ctx, route, project, work, urlFor)
+      : listSection(ctx, route, project, filters, work));
+  if (route.view === 'board') {
+    // Rotation: fetch the columns that came on screen and replace the board
+    // only; the task panel and any form keep what was typed (review round 2, P1-4).
+    ctx.onBreakpoint?.(workSlot, async () => {
+      const stillCurrent = ctx.current();
+      let columns;
+      try {
+        columns = await boardColumns(ctx, route, filters, ctx.isPhone ? ctx.isPhone() : false);
+      } catch (e) {
+        if (!stillCurrent() || !workSlot.isConnected) return;
+        if (e.kind === 'unavailable') {
+          await ctx.accessLost();
+          return;
+        }
+        workSlot.querySelector('.board-message')?.replaceChildren(`Could not load the other columns. ${e.message}`);
+        return;
+      }
+      if (!stillCurrent() || !workSlot.isConnected) return;
+      workSlot.replaceChildren(boardSection(ctx, route, project, columns, urlFor));
+    });
+  }
   const panel = route.task
     ? await taskPanel(ctx, { route, project, ws, assignees, backUrl: urlFor({}), task: openTask })
     : null;
@@ -57,15 +85,27 @@ export async function projectView(ctx, route) {
   const exportMsg = h('span', { class: 'muted', role: 'status' });
   const exportBtn = h('button', { type: 'button' }, 'Export');
   const runExport = inFlight(async () => {
+    // Who asked, captured before the request: the files are handed to the
+    // browser only if that same account is still signed in when the answer
+    // arrives (review round 2, P0-2).
+    const stillSameAccount = ctx.deliveryGuard();
     exportMsg.textContent = 'Preparing export…';
+    let files;
     try {
       const snapshot = await ctx.api.exportProject(project.id);
-      const files = operationalExport(snapshot);
-      for (const f of files) ctx.download(f.filename, f.text);
-      exportMsg.textContent = `Exported ${files.length} files.`;
+      files = operationalExport(snapshot);
     } catch (e) {
+      if (!(await stillSameAccount())) return;
+      if (e.kind === 'unavailable') {
+        await ctx.accessLost();
+        return;
+      }
       exportMsg.textContent = e.message;
+      return;
     }
+    if (!(await stillSameAccount())) return; // discarded, never downloaded
+    for (const f of files) ctx.download(f.filename, f.text);
+    exportMsg.textContent = `Exported ${files.length} files.`;
   }, () => [exportBtn]);
   exportBtn.addEventListener('click', () => runExport());
 
@@ -91,7 +131,7 @@ export async function projectView(ctx, route) {
       h('section', { class: 'work', 'aria-label': `${project.name} tasks` },
         h('div', { class: 'toolbar' }, tabs, addBtn, exportBtn, exportMsg),
         filterBar,
-        workNode),
+        workSlot),
       panel ? h('aside', { class: 'detail', 'aria-label': 'Task detail' }, panel) : null));
 }
 
@@ -248,15 +288,14 @@ function listSection(ctx, route, project, filters, entry) {
         Object.keys(filters).length ? 'Nothing matches these filters.' : 'No tasks yet. Add first task.'));
     }
     for (const t of entry.rows) list.append(taskRow(ctx, project, route, t));
-    more.replaceChildren(entry.next ? h('button', {
-      type: 'button',
-      onClick: async () => {
-        const page = await ctx.api.listTasks(project.id, filters, { after: entry.next });
-        entry.rows = entry.rows.concat(page);
-        entry.next = page.at(-1)?.next_cursor || null;
-        paint();
-      },
-    }, 'Show more') : '');
+    more.replaceChildren(...(entry.next ? moreControl(ctx, 'Show more', async () => {
+      const stillCurrent = ctx.current();
+      const page = await ctx.api.listTasks(project.id, filters, { after: entry.next });
+      if (!stillCurrent()) return;
+      entry.rows = entry.rows.concat(page);
+      entry.next = page.at(-1)?.next_cursor || null;
+      paint();
+    }) : []));
   }
   paint();
   return h('div', null, list, more);
@@ -304,15 +343,14 @@ function column(ctx, route, project, c, flash) {
     if (!c.entry) return; // not on screen (phone): fetched when chosen
     if (!c.entry.rows.length) list.append(h('li', { class: 'empty' }, 'Nothing here.'));
     for (const t of c.entry.rows) list.append(card(t));
-    more.replaceChildren(c.entry.next ? h('button', {
-      type: 'button',
-      onClick: async () => {
-        const page = await ctx.api.listTasks(project.id, c.filters, { after: c.entry.next });
-        c.entry.rows = c.entry.rows.concat(page);
-        c.entry.next = page.at(-1)?.next_cursor || null;
-        paint();
-      },
-    }, 'Show more') : '');
+    more.replaceChildren(...(c.entry.next ? moreControl(ctx, 'Show more', async () => {
+      const stillCurrent = ctx.current();
+      const page = await ctx.api.listTasks(project.id, c.filters, { after: c.entry.next });
+      if (!stillCurrent()) return;
+      c.entry.rows = c.entry.rows.concat(page);
+      c.entry.next = page.at(-1)?.next_cursor || null;
+      paint();
+    }) : []));
   }
   function card(t) {
     const url = projectUrl(project.id, { ...route, task: t.id });

@@ -12,11 +12,16 @@ export function fakeSupabase(db, getUser, opts = {}) {
     // Milliseconds each response takes to arrive after the database answered
     // (a slow network), settable per test.
     delayMs: opts.delayMs || 0,
+    // While true, every request fails as if the service were down.
+    offline: false,
     schema(name) {
       if (name !== 'eden_api') throw new Error('the app must only use the eden_api schema');
       return {
         async rpc(fn, args) {
           calls.push(fn);
+          // A service outage: the request never reaches the database
+          // (supabase-js rejects with a fetch error).
+          if (client.offline) throw new TypeError('SYNTHETIC fetch failed');
           const user = getUser();
           const keys = Object.keys(args || {});
           const params = keys.map((k) => {
@@ -102,6 +107,32 @@ export function fakeAuthClient({ failGlobalSignOut = false, failLocalSignOut = f
       onAuthStateChange() { return { data: { subscription: { unsubscribe() {} } } }; },
       async signInWithOAuth() { return { error: null }; },
     },
+  };
+}
+
+/**
+ * happy-dom updates `matches` on a viewport change but never fires the
+ * MediaQueryList `change` event a phone rotation fires in a browser. This
+ * stands in for window.matchMedia, so a test can cross the breakpoint the
+ * way Chromium does: `bp.set(false)` = narrower than 900 px.
+ */
+export function fakeBreakpoint(win, { wide = true } = {}) {
+  const listeners = new Set();
+  const mql = {
+    media: '(min-width: 900px)',
+    get matches() { return wide; },
+    addEventListener(type, fn) { if (type === 'change') listeners.add(fn); },
+    removeEventListener(type, fn) { listeners.delete(fn); },
+  };
+  const original = win.matchMedia;
+  win.matchMedia = () => mql;
+  return {
+    set(next) {
+      if (next === wide) return;
+      wide = next;
+      for (const fn of listeners) fn({ matches: wide, media: mql.media });
+    },
+    restore() { win.matchMedia = original; },
   };
 }
 

@@ -1,7 +1,7 @@
 // Task detail: edit and save, conflicts, updates thread, archive (owners),
 // and the new-task form. Failed saves keep what the person typed.
 
-import { h, field, inFlight } from '../dom.js';
+import { h, field, inFlight, moreControl } from '../dom.js';
 import { projectUrl } from '../router.js';
 import {
   STATUS_LABELS, STATUSES, OPS_KINDS, assigneeValue, assigneeFromValue, fmtDate,
@@ -270,21 +270,20 @@ function contactAdder(ctx, ws, select) {
 function updatesThread(ctx, task, readOnly) {
   const list = h('ol', { class: 'updates', 'aria-label': 'Updates' });
   let next = task.updates_next;
-  const more = h('div');
+  const more = h('div', { class: 'more' });
   const paint = (items) => {
     for (const u of items) {
       list.append(h('li', null,
         h('p', { class: 'muted' }, `${u.author_name || 'Former member'} · ${fmtDate(String(u.created_at).slice(0, 10))}`),
         h('p', { class: 'body' }, u.body)));
     }
-    more.replaceChildren(next ? h('button', {
-      type: 'button',
-      onClick: async () => {
-        const page = await ctx.api.listUpdates(task.id, next);
-        next = page.at(-1)?.next_cursor || null;
-        paint(page);
-      },
-    }, 'Show more updates') : '');
+    more.replaceChildren(...(next ? moreControl(ctx, 'Show more updates', async () => {
+      const stillCurrent = ctx.current();
+      const page = await ctx.api.listUpdates(task.id, next);
+      if (!stillCurrent()) return;
+      next = page.at(-1)?.next_cursor || null;
+      paint(page);
+    }) : []));
   };
   if (!task.updates.length) list.append(h('li', { class: 'empty' }, 'No updates yet.'));
   paint(task.updates);
@@ -297,18 +296,33 @@ function updatesThread(ctx, task, readOnly) {
   const post = inFlight(async () => {
     msg.textContent = '';
     if (!body.value.trim()) return;
+    const stillCurrent = ctx.current();
+    let posted;
     try {
-      await ctx.api.addUpdate(task.id, body.value.trim());
+      posted = await ctx.api.addUpdate(task.id, body.value.trim());
     } catch (err) {
       msg.textContent = err.message;
       return;
     }
+    if (!stillCurrent()) return;
     body.value = '';
+    // Reload the thread far enough to show everything that was on screen
+    // plus the new entry (the oldest come first), so a long, expanded
+    // thread does not shrink and hide what was just posted (review round 2, P2).
+    const shown = list.querySelectorAll('li:not(.empty)').length;
     try {
-      const page = await ctx.api.listUpdates(task.id, null);
-      next = page.at(-1)?.next_cursor || null;
+      let rows = [];
+      let cursor = null;
+      for (let pages = 0; pages < 40; pages++) {
+        const page = await ctx.api.listUpdates(task.id, cursor);
+        rows = rows.concat(page);
+        cursor = page.at(-1)?.next_cursor || null;
+        if (!cursor || (rows.length > shown && rows.some((u) => u.id === posted.id))) break;
+      }
+      if (!stillCurrent()) return;
+      next = cursor;
       list.replaceChildren();
-      paint(page);
+      paint(rows);
     } catch (err) {
       msg.textContent = `Your update was posted. ${err.message}`;
     }

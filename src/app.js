@@ -20,6 +20,9 @@ export function createApp({ root, api, auth, win = window, download }) {
     notice: null, // shown on the sign-in screen
     signOutFailed: false, // the session survived a sign-out on this device
     flash: null, // a message that must survive the next render (board moves)
+    // The screen's own answer to a phone/desktop breakpoint change, or null
+    // (review round 2, P1-4): { node, fn }, used only while node is on screen.
+    onBreakpoint: null,
   };
   let seq = 0;
 
@@ -60,6 +63,16 @@ export function createApp({ root, api, auth, win = window, download }) {
     state.metaCache = new Map();
   }
 
+  /**
+   * The database refused this account something it could read before: a
+   * roster change or a closed gate (review round 2, P0-1). Everything loaded
+   * under the old access is dropped, memberships included, so nothing of it
+   * can be painted again from memory; the next screen asks afresh.
+   */
+  function accessLost() {
+    clearData();
+  }
+
   // Matches the desktop breakpoint in styles.css; below it the board shows
   // (and fetches) one column at a time.
   const wide = win.matchMedia ? win.matchMedia('(min-width: 900px)') : null;
@@ -76,6 +89,38 @@ export function createApp({ root, api, auth, win = window, download }) {
     current() {
       const gen = state.generation;
       return () => gen === state.generation;
+    },
+    /**
+     * For a result that leaves the page (a download): true only if the same
+     * account that asked is still the one on screen AND the one the Auth
+     * client holds now (review round 2, P0-2). Capture before the request.
+     */
+    deliveryGuard() {
+      const gen = state.generation;
+      const userKey = state.userKey;
+      return async () => {
+        if (gen !== state.generation || userKey === null || userKey !== state.userKey) return false;
+        let session;
+        try {
+          session = await auth.getSession();
+        } catch {
+          return false;
+        }
+        return gen === state.generation && (session?.user?.id || null) === userKey;
+      };
+    },
+    /** Call after the database answered `unavailable` for something on screen. */
+    accessLost() {
+      accessLost();
+      return render();
+    },
+    /**
+     * Register the screen's answer to crossing the breakpoint. It runs only
+     * while `node` is on screen; nothing else is rebuilt, so forms keep what
+     * was typed (review round 2, P1-4).
+     */
+    onBreakpoint(node, fn) {
+      state.onBreakpoint = { node, fn };
     },
     async signOut() {
       // The screen and data go first, before the network is involved.
@@ -117,6 +162,7 @@ export function createApp({ root, api, auth, win = window, download }) {
   async function render() {
     seq += 1;
     const token = seq;
+    state.onBreakpoint = null;
     const route = parseRoute(win.location.pathname, win.location.search);
     if (state.signOutFailed) return show(token, signOutFailedView(ctx));
     show(token, loadingView());
@@ -176,8 +222,12 @@ export function createApp({ root, api, auth, win = window, download }) {
         node = unavailableView(ctx);
       }
     } catch (e) {
-      if (e.kind === 'unavailable') node = unavailableView(ctx);
-      else if (e.kind === 'signed_out') node = signInView(ctx);
+      if (token !== seq) return null;
+      if (e.kind === 'unavailable') {
+        // Whatever was loaded under earlier access goes now (review round 2, P0-1).
+        accessLost();
+        node = unavailableView(ctx);
+      } else if (e.kind === 'signed_out') node = signInView(ctx);
       else node = errorView(ctx, e);
     }
     if (show(token, node)) {
@@ -188,8 +238,13 @@ export function createApp({ root, api, auth, win = window, download }) {
   }
 
   win.addEventListener('popstate', () => render());
-  // Crossing the breakpoint changes which board columns are on screen.
-  wide?.addEventListener?.('change', () => render());
+  // Crossing the breakpoint (a phone rotating) changes only which board
+  // columns are on screen: the screen updates those itself, and nothing is
+  // re-rendered, so an unsaved form survives (review round 2, P1-4).
+  wide?.addEventListener?.('change', () => {
+    const hook = state.onBreakpoint;
+    if (hook && hook.node.isConnected) hook.fn();
+  });
   // Every Auth event names the session it is about. Another tab or the
   // account chooser can sign someone else in on this browser while a screen
   // is open, so the incoming account is compared with the rendered one.

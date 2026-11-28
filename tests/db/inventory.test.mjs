@@ -106,6 +106,119 @@ describe('schema and grant inventory', () => {
   });
 });
 
+// Review round 2, P0-3: the inventory must see what the app roles can reach
+// in EVERY schema, not a hard-coded list. Each case below adds one harmless
+// SYNTHETIC object reachable by an app role on a fresh database and expects
+// the collected inventory to differ from the reviewed one.
+describe('access in a schema the inventory was not told about', () => {
+  const MIGRATOR_SQL = (sql) => `set role supabase_postgres;\n${sql}\nreset role;`;
+
+  async function withExtra(sql) {
+    const db = await freshDb();
+    await db.exec(MIGRATOR_SQL(sql));
+    return collectInventory(db);
+  }
+
+  function differs(extra) {
+    return Object.keys(expected).some((k) => JSON.stringify(extra[k]) !== JSON.stringify(expected[k]));
+  }
+
+  it('the reviewer\'s case: a constant view in a new schema, usage and select granted to authenticated', async () => {
+    const extra = await withExtra(`
+      create schema synthetic_side;
+      create view synthetic_side.one as select 1 as x;
+      grant usage on schema synthetic_side to authenticated;
+      grant select on synthetic_side.one to authenticated;`);
+    expect(differs(extra)).toBe(true);
+    expect(extra.schemaUsage).toContainEqual({ schema: 'synthetic_side', grantee: 'authenticated', privilege: 'USAGE' });
+    expect(extra.relations).toContainEqual(
+      { schema: 'synthetic_side', name: 'one', kind: 'v', grantee: 'authenticated', privilege: 'SELECT' });
+  });
+
+  it('a grant to PUBLIC reaches both app roles and is listed for each', async () => {
+    const extra = await withExtra(`
+      create schema synthetic_public;
+      create table synthetic_public.t (x int);
+      grant usage on schema synthetic_public to public;
+      grant select on synthetic_public.t to public;`);
+    expect(differs(extra)).toBe(true);
+    for (const grantee of ['anon', 'authenticated']) {
+      expect(extra.relations).toContainEqual(
+        { schema: 'synthetic_public', name: 't', kind: 'r', grantee, privilege: 'SELECT' });
+    }
+  });
+
+  it('access inherited through a role the app role belongs to', async () => {
+    const extra = await withExtra(`
+      create schema synthetic_inherit;
+      create view synthetic_inherit.v as select 1 as x;
+      create role synthetic_reader nologin;
+      grant usage on schema synthetic_inherit to synthetic_reader;
+      grant select on synthetic_inherit.v to synthetic_reader;
+      grant synthetic_reader to authenticated with inherit true;`);
+    expect(differs(extra)).toBe(true);
+    expect(extra.relations).toContainEqual(
+      { schema: 'synthetic_inherit', name: 'v', kind: 'v', grantee: 'authenticated', privilege: 'SELECT' });
+    expect(extra.apiRoleMemberships.map((r) => r.role)).toContain('synthetic_reader');
+  });
+
+  it('a role the app role can only SET ROLE to (no inherit) is still listed', async () => {
+    const extra = await withExtra(`
+      create role synthetic_settable nologin;
+      grant synthetic_settable to anon with inherit false, set true;`);
+    expect(differs(extra)).toBe(true);
+    expect(extra.apiRoleMemberships).toContainEqual(
+      { member: 'anon', role: 'synthetic_settable', inherit: false, set: true });
+  });
+
+  it('a function in a new schema, a column grant and a sequence', async () => {
+    const extra = await withExtra(`
+      create schema synthetic_more;
+      grant usage on schema synthetic_more to anon;
+      create function synthetic_more.f() returns int language sql as $$ select 1 $$;
+      grant execute on function synthetic_more.f() to anon;
+      create table synthetic_more.t (a int, b int);
+      grant select (a) on synthetic_more.t to anon;
+      create sequence synthetic_more.s;
+      grant usage on sequence synthetic_more.s to anon;`);
+    expect(differs(extra)).toBe(true);
+    expect(extra.functions).toContainEqual({ schema: 'synthetic_more', name: 'f()', grantee: 'anon', privilege: 'EXECUTE' });
+    expect(extra.columns).toContainEqual(
+      { schema: 'synthetic_more', name: 't', column: 'a', grantee: 'anon', privilege: 'SELECT' });
+    expect(extra.relations).toContainEqual(
+      { schema: 'synthetic_more', name: 's', kind: 'S', grantee: 'anon', privilege: 'USAGE' });
+  });
+
+  it('outside the Eden schemas, only the reviewed platform baseline is reachable', () => {
+    // The fixture models a new hosted project; these are its built-in
+    // objects the app roles can reach. Anything else is a finding.
+    const PLATFORM = new Set(['auth', 'graphql', 'public', 'storage']);
+    for (const key of ['schemaUsage', 'relations', 'columns', 'functions']) {
+      const outside = inv[key].filter((r) => !r.schema.startsWith('eden'));
+      for (const r of outside) expect(PLATFORM.has(r.schema), `${key}: ${JSON.stringify(r)}`).toBe(true);
+    }
+    // No platform table or view is reachable at all, and the only platform
+    // function is auth.uid().
+    expect(inv.relations.filter((r) => !r.schema.startsWith('eden'))).toEqual([]);
+    expect(inv.columns.filter((r) => !r.schema.startsWith('eden'))).toEqual([]);
+    expect([...new Set(inv.functions.filter((r) => !r.schema.startsWith('eden')).map((r) => `${r.schema}.${r.name}`))])
+      .toEqual(['auth.uid()']);
+    expect(inv.apiRoleMemberships).toEqual([]);
+  });
+
+  // Dropping pg_graphql leaves its empty schema behind, still carrying the
+  // extension's USAGE grants (the widened inventory found it). It must stay
+  // empty: nothing in it is reachable by an app role.
+  it('the schema pg_graphql leaves behind holds nothing an app role can reach', async () => {
+    for (const key of ['relations', 'columns', 'functions']) {
+      expect(inv[key].filter((r) => r.schema === 'graphql'), key).toEqual([]);
+    }
+    const { rows } = await graphqlDb.query(
+      `select count(*)::int as n from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'graphql'`);
+    expect(rows[0].n).toBe(0);
+  });
+});
+
 describe('Data API settings in supabase/config.toml', () => {
   const toml = readFileSync(join(repoRoot, 'supabase', 'config.toml'), 'utf8');
   it('exposes exactly eden_api', () => {

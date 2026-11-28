@@ -165,6 +165,9 @@ describe('every published operation, including nested JSON', () => {
     const [contact] = await asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_contact', {
       p_workspace_id: cast.ws.home_building, p_display_name: `SYNTHETIC contact for ${who.label}`, p_kind: 'person',
     }));
+    const [contact2] = await asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_contact', {
+      p_workspace_id: cast.ws.home_building, p_display_name: `SYNTHETIC contact two for ${who.label}`, p_kind: 'person',
+    }));
     const scratchProject = (n) => asUser(db, cast.owner.id, (tx) => rpc(tx, 'create_project', {
       p_workspace_id: cast.ws.home_building, p_name: `SYNTHETIC scratch ${n} for ${who.label}`,
     })).then((r) => r[0]);
@@ -182,6 +185,8 @@ describe('every published operation, including nested JSON', () => {
       list_assignees: { p_workspace_id: cast.ws.home_building },
       create_contact: { p_workspace_id: cast.ws.home_building, p_display_name: `SYNTHETIC new ${who.label}`, p_kind: 'vendor' },
       set_contact_archived: { p_contact_id: contact.id, p_archived: true },
+      list_contacts: { p_workspace_id: cast.ws.home_building, p_archived: true },
+      update_contact: { p_contact_id: contact2.id, p_display_name: `SYNTHETIC renamed by ${who.label}`, p_kind: 'vendor' },
       list_projects: { p_workspace_id: cast.ws.home_building, p_include_archived: true },
       get_project: { p_project_id: project.id },
       create_project: { p_workspace_id: cast.ws.home_building, p_name: `SYNTHETIC created by ${who.label}` },

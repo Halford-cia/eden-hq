@@ -50,6 +50,37 @@ export function inFlight(fn, controls = () => []) {
   return run;
 }
 
+/**
+ * A "Show more" control (review round 2, P1-6): `load` fetches and paints the
+ * next page. While it runs the button is disabled; if it fails, what is on
+ * screen stays, and a message beside the button says so and how to retry.
+ * A page that arrives after the account changed is dropped by `load` itself
+ * (ctx.current()). If the database now refuses access, the screen is taken
+ * down (ctx.accessLost, review round 2, P0-1).
+ * Returns the nodes to place in the `.more` container.
+ */
+export function moreControl(ctx, label, load) {
+  const msg = h('p', { class: 'error', role: 'alert' });
+  const btn = h('button', { type: 'button' }, label);
+  const run = inFlight(async () => {
+    msg.textContent = '';
+    try {
+      await load();
+    } catch (e) {
+      if (e?.kind === 'unavailable' && ctx.accessLost) {
+        await ctx.accessLost();
+        return;
+      }
+      const why = e?.kind === 'network' || !e?.message
+        ? 'Eden HQ could not be reached.'
+        : e.message;
+      msg.textContent = `Could not load more. ${why} What is shown is unchanged; tap ${label} to try again.`;
+    }
+  }, () => [btn]);
+  btn.addEventListener('click', () => run());
+  return [btn, msg];
+}
+
 let idSeq = 0;
 export function uid(prefix = 'f') {
   idSeq += 1;
