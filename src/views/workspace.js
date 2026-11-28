@@ -1,6 +1,6 @@
 // Workspace home: the project (or property) list, and New project for owners.
 
-import { h, field } from '../dom.js';
+import { h, field, inFlight } from '../dom.js';
 import { topBar } from './entry.js';
 
 export async function workspaceView(ctx, route) {
@@ -46,29 +46,36 @@ export async function workspaceView(ctx, route) {
     const name = h('input', { type: 'text', required: true, maxlength: 120, autocomplete: 'off' });
     const desc = h('textarea', { rows: 2, maxlength: 4000 });
     const msg = h('p', { class: 'error', role: 'alert' });
+    const submitBtn = h('button', { class: 'primary', type: 'submit' }, `Create ${noun}`);
+    // One create per tap, however slow the answer (review P1-7).
+    const create = inFlight(async () => {
+      msg.textContent = '';
+      if (!name.value.trim()) {
+        msg.textContent = `Give the ${noun} a name.`;
+        return;
+      }
+      let p;
+      try {
+        p = await ctx.api.createProject(ws.workspace_id, name.value.trim(), desc.value.trim());
+      } catch (err) {
+        msg.textContent = err.message;
+        return;
+      }
+      ctx.invalidate();
+      await ctx.navigate(`/p/${p.id}`);
+    }, () => [submitBtn]);
     form = h('form', {
       class: 'panel',
-      onSubmit: async (e) => {
+      onSubmit: (e) => {
         e.preventDefault();
-        msg.textContent = '';
-        if (!name.value.trim()) {
-          msg.textContent = `Give the ${noun} a name.`;
-          return;
-        }
-        try {
-          const p = await ctx.api.createProject(ws.workspace_id, name.value.trim(), desc.value.trim());
-          ctx.invalidate();
-          await ctx.navigate(`/p/${p.id}`);
-        } catch (err) {
-          msg.textContent = err.message;
-        }
+        create();
       },
     },
     h('h2', null, `New ${noun}`),
     field(`${Noun} name`, name),
     field('Description (optional)', desc),
     msg,
-    h('button', { class: 'primary', type: 'submit' }, `Create ${noun}`));
+    submitBtn);
   }
 
   const archivedToggle = h('a', {

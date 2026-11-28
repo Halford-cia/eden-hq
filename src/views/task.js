@@ -1,7 +1,7 @@
 // Task detail: edit and save, conflicts, updates thread, archive (owners),
 // and the new-task form. Failed saves keep what the person typed.
 
-import { h, field } from '../dom.js';
+import { h, field, inFlight } from '../dom.js';
 import { projectUrl } from '../router.js';
 import {
   STATUS_LABELS, STATUSES, OPS_KINDS, assigneeValue, assigneeFromValue, fmtDate,
@@ -34,11 +34,15 @@ export function diffChanges(base, draft, { ops }) {
   return changes;
 }
 
-export async function taskPanel(ctx, { route, project, ws, assignees, backUrl }) {
+/**
+ * `task` is fetched by the project screen in parallel with the rest of the
+ * page (review P1-8), or null for the new-task form.
+ */
+export async function taskPanel(ctx, { route, project, ws, assignees, backUrl, task: fetched = null }) {
   const ops = ws.kind === 'stay_eden_ops';
   const isOwner = ws.role === 'owner';
   const isNew = route.task === 'new';
-  let task = isNew ? null : await ctx.api.getTask(route.task);
+  const task = isNew ? null : fetched;
   if (task && task.project_id !== project.id) {
     // A task from another project: show it under its own project.
     await ctx.navigate(projectUrl(task.project_id, { task: task.id }), { replace: true });
@@ -84,8 +88,12 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl })
     follow_up_on: followUp ? followUp.value : '',
   });
 
-  async function save(e) {
-    e?.preventDefault();
+  const submitBtn = readOnly ? null
+    : h('button', { class: 'primary', type: 'submit' }, isNew ? (ops ? 'Add item' : 'Add task') : 'Save');
+  // One create or save per tap, however slow the answer (review P1-7).
+  const save = inFlight(saveNow, () => [submitBtn]);
+
+  async function saveNow() {
     msg.replaceChildren();
     const d = draft();
     if (!d.title) {
@@ -133,33 +141,38 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl })
 
   function showConflict(mine) {
     const mineChanges = diffChanges(base, mine, { ops });
+    const reapplyBtn = h('button', { type: 'button', class: 'primary' }, 'Reapply my changes');
+    const reapply = inFlight(async () => {
+      try {
+        const fresh = await ctx.api.getTask(task.id);
+        await ctx.api.updateTask(fresh.id, fresh.version, mineChanges);
+        ctx.invalidate();
+        await ctx.render();
+      } catch (err) {
+        if (err.kind === 'conflict') {
+          msg.replaceChildren(h('p', { class: 'error' }, 'It changed again. Reload and try once more.'));
+        } else {
+          msg.replaceChildren(h('p', { class: 'error' }, err.message));
+        }
+      }
+    }, () => [reapplyBtn]);
+    reapplyBtn.addEventListener('click', () => reapply());
     msg.replaceChildren(h('div', { class: 'conflict' },
       h('p', null, 'Someone else saved this task while you were editing. Your changes are not saved yet.'),
       h('button', {
         type: 'button',
         onClick: async () => { ctx.invalidate(); await ctx.render(); },
       }, 'Reload (discard mine)'),
-      h('button', {
-        type: 'button',
-        class: 'primary',
-        onClick: async () => {
-          try {
-            const fresh = await ctx.api.getTask(task.id);
-            await ctx.api.updateTask(fresh.id, fresh.version, mineChanges);
-            ctx.invalidate();
-            await ctx.render();
-          } catch (err) {
-            if (err.kind === 'conflict') {
-              msg.replaceChildren(h('p', { class: 'error' }, 'It changed again. Reload and try once more.'));
-            } else {
-              msg.replaceChildren(h('p', { class: 'error' }, err.message));
-            }
-          }
-        },
-      }, 'Reapply my changes')));
+      reapplyBtn));
   }
 
-  const form = h('form', { class: 'task-form', onSubmit: save },
+  const form = h('form', {
+    class: 'task-form',
+    onSubmit: (e) => {
+      e.preventDefault();
+      save();
+    },
+  },
     field(ops ? 'Item' : 'Task', title),
     kind ? field('Type', kind) : null,
     field('Assignee', assignee),
@@ -169,7 +182,7 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl })
     followUp ? field('Follow up', followUp) : null,
     field('Description', description),
     msg,
-    readOnly ? null : h('button', { class: 'primary', type: 'submit' }, isNew ? (ops ? 'Add item' : 'Add task') : 'Save'));
+    submitBtn);
 
   const parts = [back, h('h2', null, isNew ? (ops ? 'New item' : 'New task') : task.title)];
   if (task) {
@@ -179,19 +192,20 @@ export async function taskPanel(ctx, { route, project, ws, assignees, backUrl })
   }
   parts.push(form);
   if (task && isOwner && !project.archived) {
-    parts.push(h('button', {
-      type: 'button',
-      onClick: async () => {
-        try {
-          await ctx.api.setTaskArchived(task.id, task.version, !task.archived);
-          ctx.invalidate();
-          await ctx.render();
-        } catch (err) {
-          msg.replaceChildren(h('p', { class: 'error' }, err.kind === 'conflict'
-            ? 'Someone else changed this task. Reload and try again.' : err.message));
-        }
-      },
-    }, task.archived ? 'Restore' : 'Archive'));
+    const archiveBtn = h('button', { type: 'button' }, task.archived ? 'Restore' : 'Archive');
+    const archive = inFlight(async () => {
+      try {
+        await ctx.api.setTaskArchived(task.id, task.version, !task.archived);
+      } catch (err) {
+        msg.replaceChildren(h('p', { class: 'error' }, err.kind === 'conflict'
+          ? 'Someone else changed this task. Reload and try again.' : err.message));
+        return;
+      }
+      ctx.invalidate();
+      await ctx.render();
+    }, () => [archiveBtn]);
+    archiveBtn.addEventListener('click', () => archive());
+    parts.push(archiveBtn);
   }
   if (task) parts.push(updatesThread(ctx, task, readOnly));
   return h('div', { class: 'task-panel' }, parts);
@@ -226,29 +240,29 @@ function contactAdder(ctx, ws, select) {
   const name = h('input', { type: 'text', maxlength: 120, autocomplete: 'off' });
   const kind = h('select', null, h('option', { value: 'vendor' }, 'Company'), h('option', { value: 'person' }, 'Person'));
   const msg = h('p', { class: 'error', role: 'alert' });
+  const addBtn = h('button', { type: 'button' }, 'Add name');
+  const add = inFlight(async () => {
+    msg.textContent = '';
+    if (!name.value.trim()) {
+      msg.textContent = 'Type a name.';
+      return;
+    }
+    try {
+      const c = await ctx.api.createContact(ws.workspace_id, name.value.trim(), kind.value);
+      const opt = h('option', { value: `contact:${c.id}`, selected: true }, name.value.trim());
+      select.insertBefore(opt, select.lastChild);
+      select.value = `contact:${c.id}`;
+      box.hidden = true;
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  }, () => [addBtn]);
+  addBtn.addEventListener('click', () => add());
   const box = h('div', { class: 'panel inline' },
     field('Name', name),
     field('Kind', kind),
     msg,
-    h('button', {
-      type: 'button',
-      onClick: async () => {
-        msg.textContent = '';
-        if (!name.value.trim()) {
-          msg.textContent = 'Type a name.';
-          return;
-        }
-        try {
-          const c = await ctx.api.createContact(ws.workspace_id, name.value.trim(), kind.value);
-          const opt = h('option', { value: `contact:${c.id}`, selected: true }, name.value.trim());
-          select.insertBefore(opt, select.lastChild);
-          select.value = `contact:${c.id}`;
-          box.hidden = true;
-        } catch (err) {
-          msg.textContent = err.message;
-        }
-      },
-    }, 'Add name'));
+    addBtn);
   box.hidden = true;
   return box;
 }
@@ -277,19 +291,33 @@ function updatesThread(ctx, task, readOnly) {
 
   const body = h('textarea', { rows: 2, maxlength: 4000 });
   const msg = h('p', { class: 'error', role: 'alert' });
+  const postBtn = h('button', { type: 'submit' }, 'Post update');
+  // Posting refreshes this thread only: the task form above, and anything
+  // typed into it, is left alone (review P1-5). One post per tap (P1-7).
+  const post = inFlight(async () => {
+    msg.textContent = '';
+    if (!body.value.trim()) return;
+    try {
+      await ctx.api.addUpdate(task.id, body.value.trim());
+    } catch (err) {
+      msg.textContent = err.message;
+      return;
+    }
+    body.value = '';
+    try {
+      const page = await ctx.api.listUpdates(task.id, null);
+      next = page.at(-1)?.next_cursor || null;
+      list.replaceChildren();
+      paint(page);
+    } catch (err) {
+      msg.textContent = `Your update was posted. ${err.message}`;
+    }
+  }, () => [postBtn]);
   const form = readOnly ? null : h('form', {
-    onSubmit: async (e) => {
+    onSubmit: (e) => {
       e.preventDefault();
-      msg.textContent = '';
-      if (!body.value.trim()) return;
-      try {
-        await ctx.api.addUpdate(task.id, body.value.trim());
-        ctx.invalidate();
-        await ctx.render();
-      } catch (err) {
-        msg.textContent = err.message;
-      }
+      post();
     },
-  }, field('Add update', body), msg, h('button', { type: 'submit' }, 'Post update'));
+  }, field('Add update', body), msg, postBtn);
   return h('section', { class: 'thread' }, h('h3', null, 'Updates'), list, more, form);
 }

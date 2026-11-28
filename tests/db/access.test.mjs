@@ -167,6 +167,7 @@ describe('the manager in Stay Eden operations', () => {
       ['create_contact', { p_workspace_id: cast.ws.stay_eden_ops, p_display_name: 'x', p_kind: 'vendor' }],
       ['set_task_archived', { p_task_id: opsItem.id, p_expected_version: 2, p_archived: true }],
       ['set_project_archived', { p_project_id: opsProject.id, p_expected_version: 1, p_archived: true }],
+      ['update_project', { p_project_id: opsProject.id, p_expected_version: 1, p_name: 'SYNTHETIC renamed' }],
     ]) {
       const err = await rejects(asUser(db, cast.manager.id, (tx) => rpc(tx, name, args)));
       expect(err.code).toBe('42501');

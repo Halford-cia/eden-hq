@@ -60,10 +60,15 @@ export function createApp({ root, api, auth, win = window, download }) {
     state.metaCache = new Map();
   }
 
+  // Matches the desktop breakpoint in styles.css; below it the board shows
+  // (and fetches) one column at a time.
+  const wide = win.matchMedia ? win.matchMedia('(min-width: 900px)') : null;
+
   const ctx = {
     api, auth, state, navigate, invalidate, win,
     download: download || defaultDownload(win),
     render: () => render(),
+    isPhone: () => (wide ? !wide.matches : false),
     workspace(id) {
       return (state.workspaces || []).find((w) => w.workspace_id === id) || null;
     },
@@ -183,6 +188,8 @@ export function createApp({ root, api, auth, win = window, download }) {
   }
 
   win.addEventListener('popstate', () => render());
+  // Crossing the breakpoint changes which board columns are on screen.
+  wide?.addEventListener?.('change', () => render());
   // Every Auth event names the session it is about. Another tab or the
   // account chooser can sign someone else in on this browser while a screen
   // is open, so the incoming account is compared with the rendered one.

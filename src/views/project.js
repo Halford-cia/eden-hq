@@ -1,7 +1,13 @@
 // Project (or property) screen: List and Board views of the same tasks, with
 // task detail beside the view on desktop and full screen on a phone.
+//
+// Requests (review P1-8): the project, the visible tasks and an opened task
+// are fetched together; assignees follow once the workspace is known. Project
+// metadata and assignees are cached with the page cache, which an account
+// change, a workspace switch or any save replaces. On a phone the board
+// fetches only the column on screen.
 
-import { h, field } from '../dom.js';
+import { h, field, inFlight } from '../dom.js';
 import { ApiError } from '../api.js';
 import { projectUrl, filtersFromRoute } from '../router.js';
 import { STATUS_LABELS, STATUSES, fmtRange, fmtDate } from '../format.js';
@@ -9,23 +15,39 @@ import { operationalExport } from '../csv.js';
 import { topBar } from './entry.js';
 import { taskPanel } from './task.js';
 
+/** A cached value from the current metadata cache (never written into a newer one). */
+async function cached(ctx, key, fetch) {
+  const cache = ctx.state.metaCache;
+  if (cache.has(key)) return cache.get(key);
+  const value = await fetch();
+  cache.set(key, value);
+  return value;
+}
+
 export async function projectView(ctx, route) {
-  const project = await ctx.api.getProject(route.projectId);
+  const filters = filtersFromRoute(route);
+  const phone = ctx.isPhone ? ctx.isPhone() : false;
+  const urlFor = (extra) => projectUrl(route.projectId, { ...route, task: null, ...extra });
+  const wantTask = route.task && route.task !== 'new';
+
+  const [project, work, openTask] = await Promise.all([
+    cached(ctx, `project|${route.projectId}`, () => ctx.api.getProject(route.projectId)),
+    route.view === 'board'
+      ? boardColumns(ctx, route, filters, phone)
+      : listEntry(ctx, route, filters),
+    wantTask ? ctx.api.getTask(route.task) : null,
+  ]);
   const ws = ctx.workspace(project.workspace_id);
   if (!ws) throw new ApiError('unavailable', 'This is not available.');
   const ops = ws.kind === 'stay_eden_ops';
   const isOwner = ws.role === 'owner';
-  const filters = filtersFromRoute(route);
-  const urlFor = (extra) => projectUrl(project.id, { ...route, task: null, ...extra });
+  const assignees = await cached(ctx, `assignees|${ws.workspace_id}`, () => ctx.api.listAssignees(ws.workspace_id));
 
-  const [assignees, work] = await Promise.all([
-    ctx.api.listAssignees(ws.workspace_id),
-    route.view === 'board'
-      ? boardSection(ctx, route, project, filters, urlFor)
-      : listSection(ctx, route, project, filters),
-  ]);
+  const workNode = route.view === 'board'
+    ? boardSection(ctx, route, project, work, urlFor)
+    : listSection(ctx, route, project, filters, work);
   const panel = route.task
-    ? await taskPanel(ctx, { route, project, ws, assignees, backUrl: urlFor({}) })
+    ? await taskPanel(ctx, { route, project, ws, assignees, backUrl: urlFor({}), task: openTask })
     : null;
 
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'View' },
@@ -33,20 +55,19 @@ export async function projectView(ctx, route) {
     tab(ctx, 'Board', route.view === 'board', urlFor({ view: 'board' })));
 
   const exportMsg = h('span', { class: 'muted', role: 'status' });
-  const exportBtn = h('button', {
-    type: 'button',
-    onClick: async () => {
-      exportMsg.textContent = 'Preparing export…';
-      try {
-        const snapshot = await ctx.api.exportProject(project.id);
-        const files = operationalExport(snapshot);
-        for (const f of files) ctx.download(f.filename, f.text);
-        exportMsg.textContent = `Exported ${files.length} files.`;
-      } catch (e) {
-        exportMsg.textContent = e.message;
-      }
-    },
-  }, 'Export');
+  const exportBtn = h('button', { type: 'button' }, 'Export');
+  const runExport = inFlight(async () => {
+    exportMsg.textContent = 'Preparing export…';
+    try {
+      const snapshot = await ctx.api.exportProject(project.id);
+      const files = operationalExport(snapshot);
+      for (const f of files) ctx.download(f.filename, f.text);
+      exportMsg.textContent = `Exported ${files.length} files.`;
+    } catch (e) {
+      exportMsg.textContent = e.message;
+    }
+  }, () => [exportBtn]);
+  exportBtn.addEventListener('click', () => runExport());
 
   const addBtn = project.archived ? null : h('a', {
     class: 'button primary',
@@ -55,6 +76,7 @@ export async function projectView(ctx, route) {
   }, ops ? '+ Item' : '+ Task');
 
   const filterBar = filterControls(ctx, route, assignees, urlFor);
+  const controls = isOwner ? projectControls(ctx, project, ops) : null;
 
   return h('main', { class: `screen project${panel ? ' has-detail' : ''}` },
     topBar(ctx, ws.workspace_id),
@@ -64,12 +86,86 @@ export async function projectView(ctx, route) {
         onClick: (e) => { e.preventDefault(); ctx.navigate(`/w/${ws.workspace_id}`); },
       }, ops ? '‹ Properties' : '‹ Projects'),
       h('h1', null, project.name, project.archived ? h('span', { class: 'badge' }, 'Archived') : null)),
+    controls,
     h('div', { class: 'layout' },
       h('section', { class: 'work', 'aria-label': `${project.name} tasks` },
         h('div', { class: 'toolbar' }, tabs, addBtn, exportBtn, exportMsg),
         filterBar,
-        work),
+        workNode),
       panel ? h('aside', { class: 'detail', 'aria-label': 'Task detail' }, panel) : null));
+}
+
+/**
+ * Owners correct a project's name and description, and archive or restore
+ * it, each against the version they loaded (review P1-9). The database
+ * refuses members and the manager whatever the screen shows.
+ */
+function projectControls(ctx, project, ops) {
+  const Noun = ops ? 'Property' : 'Project';
+  const noun = ops ? 'property' : 'project';
+  const msg = h('p', { class: 'error', role: 'alert' });
+
+  const name = h('input', { type: 'text', required: true, maxlength: 120, autocomplete: 'off', value: project.name });
+  const desc = h('textarea', { rows: 2, maxlength: 4000, value: project.description || '' });
+  const saveBtn = h('button', { class: 'primary', type: 'submit' }, 'Save');
+  const editMsg = h('p', { class: 'error', role: 'alert' });
+  const save = inFlight(async () => {
+    editMsg.textContent = '';
+    if (!name.value.trim()) {
+      editMsg.textContent = `Give the ${noun} a name.`;
+      return;
+    }
+    try {
+      await ctx.api.updateProject(project.id, project.version, name.value.trim(), desc.value.trim());
+    } catch (err) {
+      // What was typed stays in the form.
+      editMsg.textContent = err.kind === 'conflict'
+        ? `Someone else saved this ${noun} first. Reload to see their change; what you typed is still here.`
+        : err.message;
+      return;
+    }
+    ctx.invalidate();
+    await ctx.render();
+  }, () => [saveBtn]);
+  const form = h('form', {
+    class: 'panel project-edit',
+    onSubmit: (e) => {
+      e.preventDefault();
+      save();
+    },
+  },
+  field(`${Noun} name`, name),
+  field('Description (optional)', desc),
+  editMsg,
+  saveBtn,
+  h('button', { type: 'button', onClick: () => { form.hidden = true; editBtn.hidden = false; } }, 'Cancel'));
+  form.hidden = true;
+
+  const editBtn = h('button', {
+    type: 'button',
+    onClick: () => { form.hidden = false; editBtn.hidden = true; name.focus?.(); },
+  }, `Edit ${noun}`);
+
+  const archiveBtn = h('button', { type: 'button' }, project.archived ? `Restore ${noun}` : `Archive ${noun}`);
+  const archive = inFlight(async () => {
+    msg.textContent = '';
+    try {
+      await ctx.api.setProjectArchived(project.id, project.version, !project.archived);
+    } catch (err) {
+      msg.textContent = err.kind === 'conflict'
+        ? `Someone else changed this ${noun}. Reload and try again.`
+        : err.message;
+      return;
+    }
+    ctx.invalidate();
+    await ctx.render();
+  }, () => [archiveBtn]);
+  archiveBtn.addEventListener('click', () => archive());
+
+  return h('div', { class: 'project-controls' },
+    h('div', { class: 'toolbar' }, project.archived ? null : editBtn, archiveBtn),
+    msg,
+    project.archived ? null : form);
 }
 
 function tab(ctx, label, active, url) {
@@ -136,9 +232,12 @@ function taskRow(ctx, project, route, t) {
     t.archived ? h('span', { class: 'badge' }, 'Archived') : null));
 }
 
-async function listSection(ctx, route, project, filters) {
-  const key = `list|${project.id}|${JSON.stringify(filters)}`;
-  const entry = await loadPage(ctx, key, (after) => ctx.api.listTasks(project.id, filters, { after }));
+function listEntry(ctx, route, filters) {
+  const key = `list|${route.projectId}|${JSON.stringify(filters)}`;
+  return loadPage(ctx, key, (after) => ctx.api.listTasks(route.projectId, filters, { after }));
+}
+
+function listSection(ctx, route, project, filters, entry) {
   const list = h('ul', { class: 'task-list', 'aria-label': 'Tasks' });
   const more = h('div', { class: 'more' });
 
@@ -163,36 +262,46 @@ async function listSection(ctx, route, project, filters) {
   return h('div', null, list, more);
 }
 
-async function boardSection(ctx, route, project, filters, urlFor) {
-  const columns = await Promise.all(STATUSES.map(async (status) => {
+/** Board columns: all three on a wide screen, only the visible one on a phone. */
+function boardColumns(ctx, route, filters, phone) {
+  return Promise.all(STATUSES.map(async (status) => {
     const f = { ...filters, status };
-    const key = `board|${project.id}|${JSON.stringify(f)}`;
-    const entry = await loadPage(ctx, key, (after) => ctx.api.listTasks(project.id, f, { after }));
+    if (phone && status !== route.column) return { status, entry: null, filters: f };
+    const key = `board|${route.projectId}|${JSON.stringify(f)}`;
+    const entry = await loadPage(ctx, key, (after) => ctx.api.listTasks(route.projectId, f, { after }));
     return { status, entry, filters: f };
   }));
+}
 
+function boardSection(ctx, route, project, columns, urlFor) {
   const picker = h('select', {
     'aria-label': 'Board column',
     onChange: (e) => ctx.navigate(urlFor({ column: e.target.value }), { keepScroll: true }),
   }, columns.map((c) => h('option', { value: c.status, selected: route.column === c.status },
-    `${STATUS_LABELS[c.status]} ${c.entry.rows.length}${c.entry.next ? '+' : ''}`)));
+    c.entry ? `${STATUS_LABELS[c.status]} ${c.entry.rows.length}${c.entry.next ? '+' : ''}` : STATUS_LABELS[c.status])));
   const nextIdx = (STATUSES.indexOf(route.column) + 1) % STATUSES.length;
   const nextBtn = h('button', {
     type: 'button',
     onClick: () => ctx.navigate(urlFor({ column: STATUSES[nextIdx] }), { keepScroll: true }),
   }, 'Next column');
 
-  const msg = h('p', { class: 'error', role: 'alert' });
+  // A failed move's explanation survives the reload that follows it
+  // (review P1-6), and is shown once.
+  const flash = ctx.state.flash && ctx.state.flash.kind === 'board-move' && ctx.state.flash.projectId === project.id
+    ? ctx.state.flash : null;
+  if (flash) ctx.state.flash = null;
+  const msg = h('p', { class: 'error board-message', role: 'alert' }, flash ? flash.text : '');
   const board = h('div', { class: 'board', 'data-col': route.column },
-    columns.map((c) => column(ctx, route, project, c, msg)));
+    columns.map((c) => column(ctx, route, project, c, flash)));
   return h('div', null, h('div', { class: 'board-picker' }, picker, nextBtn), msg, board);
 }
 
-function column(ctx, route, project, c, msg) {
+function column(ctx, route, project, c, flash) {
   const list = h('ul', { class: 'cards' });
   const more = h('div', { class: 'more' });
   function paint() {
     list.replaceChildren();
+    if (!c.entry) return; // not on screen (phone): fetched when chosen
     if (!c.entry.rows.length) list.append(h('li', { class: 'empty' }, 'Nothing here.'));
     for (const t of c.entry.rows) list.append(card(t));
     more.replaceChildren(c.entry.next ? h('button', {
@@ -207,19 +316,26 @@ function column(ctx, route, project, c, msg) {
   }
   function card(t) {
     const url = projectUrl(project.id, { ...route, task: t.id });
+    const failed = flash && flash.taskId === t.id;
     const move = h('select', {
       'aria-label': `Move ${t.title}`,
       disabled: t.archived,
       onChange: async (e) => {
         const to = e.target.value;
         if (!to || to === t.status) return;
+        move.disabled = true;
         try {
           await ctx.api.setTaskStatus(t.id, t.version, to);
-          msg.textContent = '';
+          ctx.state.flash = null;
         } catch (err) {
-          msg.textContent = err.kind === 'conflict'
-            ? 'Someone else changed that task. The board has been reloaded.'
-            : err.message;
+          ctx.state.flash = {
+            kind: 'board-move',
+            projectId: project.id,
+            taskId: t.id,
+            text: err.kind === 'conflict'
+              ? `Could not move “${t.title}”: someone else changed that task first. The board has been reloaded; check the card and move it again.`
+              : `Could not move “${t.title}”: ${err.message}`,
+          };
         }
         ctx.invalidate();
         await ctx.render();
@@ -227,8 +343,9 @@ function column(ctx, route, project, c, msg) {
     },
     h('option', { value: '' }, 'Move to…'),
     STATUSES.filter((s) => s !== t.status).map((s) => h('option', { value: s }, STATUS_LABELS[s])));
-    return h('li', { class: 'card' },
+    return h('li', { class: `card${failed ? ' move-failed' : ''}` },
       h('span', { class: 'task-title' }, t.title),
+      failed ? h('span', { class: 'badge' }, 'Move failed') : null,
       h('span', { class: 'task-meta' }, [t.assignee_name, fmtRange(t.start_on, t.due_on)].filter(Boolean).join(' · ')),
       h('div', { class: 'card-actions' },
         h('a', { href: url, onClick: (e) => { e.preventDefault(); ctx.navigate(url); } }, 'Open'),

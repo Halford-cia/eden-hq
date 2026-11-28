@@ -129,6 +129,11 @@ textarea { resize: vertical; }
 .col h2 { font-size: 1rem; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 4px; }
 .card-actions { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; }
+.card.move-failed { border-color: var(--error); border-width: 2px; }
+.board-message:empty { display: none; }
+.project-controls .toolbar { margin-top: 0; }
+.notice { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; }
+button:disabled { opacity: 0.6; cursor: progress; }
 
 /* Phone: one board column at a time. */
 .board[data-col="ready"] .col:not([data-status="ready"]),

@@ -26,6 +26,30 @@ export function h(tag, attrs, ...children) {
   return el;
 }
 
+/**
+ * One submission at a time (review P1-7): while `fn` is pending, further
+ * calls are ignored and the given controls are disabled; they are enabled
+ * again when it settles, so a failure can be retried.
+ *   const run = inFlight(async () => { ... }, () => [button]);
+ */
+export function inFlight(fn, controls = () => []) {
+  let busy = false;
+  const run = async (...args) => {
+    if (busy) return undefined;
+    busy = true;
+    const disabled = controls().filter(Boolean);
+    for (const c of disabled) c.disabled = true;
+    try {
+      return await fn(...args);
+    } finally {
+      busy = false;
+      for (const c of disabled) c.disabled = false;
+    }
+  };
+  run.isBusy = () => busy;
+  return run;
+}
+
 let idSeq = 0;
 export function uid(prefix = 'f') {
   idSeq += 1;

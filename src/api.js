@@ -72,6 +72,12 @@ export function createApi(client) {
     getProject: (projectId) => one('get_project', { p_project_id: projectId }),
     createProject: (workspaceId, name, description) =>
       one('create_project', { p_workspace_id: workspaceId, p_name: name, p_description: description || null }),
+    updateProject: (projectId, expectedVersion, name, description) => one('update_project', {
+      p_project_id: projectId, p_expected_version: expectedVersion, p_name: name, p_description: description || null,
+    }),
+    setProjectArchived: (projectId, expectedVersion, archived) => one('set_project_archived', {
+      p_project_id: projectId, p_expected_version: expectedVersion, p_archived: archived,
+    }),
     listAssignees: (workspaceId) => call('list_assignees', { p_workspace_id: workspaceId }),
     createContact: (workspaceId, displayName, kind) =>
       one('create_contact', { p_workspace_id: workspaceId, p_display_name: displayName, p_kind: kind }),
