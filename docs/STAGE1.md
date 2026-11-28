@@ -8,7 +8,7 @@ Stage 1 of [the spec](SPEC.md): Google sign-in, the two workspaces, roles and me
 | --- | --- |
 | Database (forward-only migrations) | `supabase/migrations/20261127000100_stage1_foundation.sql` (schemas, roles, tables, RLS, membership helper, access gate, owner-only money guard), `…000200_stage1_api.sql` (the `eden_api` operations) |
 | Browser app (Vite, no framework) | `index.html`, `src/` (`api.js` is the only data path; `views/` hold the screens) |
-| Operator scripts | `scripts/roster.mjs` (`roster:pending`, `roster:apply`, `roster:show`), `scripts/access.mjs` (`access:open`, `access:close`), `scripts/restore-verify.mjs` |
+| Operator scripts | `scripts/roster.mjs` (`roster:pending`, `roster:apply`, `roster:show`), `scripts/access.mjs` (`access:open`, `access:close`), `scripts/restore-apply.mjs`, `scripts/restore-verify.mjs` |
 | Public-repository and build guards | `scripts/check-public.mjs`, `scripts/build-guard.mjs` (runs first in `npm run build`), `scripts/check-dist.mjs`, `.githooks/pre-push` |
 | Hosted backup (Cloud Run jobs) | `backup/worker.mjs`, `backup/watch.mjs`, `backup/lib.mjs`, `backup/Dockerfile`, `backup/cloudbuild.yaml` |
 | Tests | `tests/db/` (each role against the migrations), `tests/web/` (the screens against the same database), `tests/scripts/` (roster, gate, guards, build, backup logic) |
@@ -28,9 +28,27 @@ Stage 1 of [the spec](SPEC.md): Google sign-in, the two workspaces, roles and me
 | Realtime: no Eden table in the publication | `tests/db/inventory.test.mjs`; the live subscription check is Hank's (SETUP.md §3, §6) |
 | Public repository and build: secret-shaped key refused with no `dist/`; planted markers absent from assets; deny-listed value, roster-shaped file and unmarked fixture refused; no report shows a matched value | `tests/scripts/public.test.mjs`, `tests/scripts/build.test.mjs` |
 | Owner-only money enforced in the database (built now, used in Stage 2) | `tests/db/money-guard.test.mjs` |
-| Scheduled backup, restore drill with the roster | Hank's hosted runs (SETUP.md §10–11); the logic they use (snapshot facts, manifest, restore verification, superseded-gate closing, watch verdict) is in `tests/scripts/backup.test.mjs` |
+| Scheduled backup, restore drill with the roster | Hank's hosted runs (SETUP.md §10–11). Locally: `tests/scripts/restore.test.mjs` runs the worker's dump commands and the real `restore:apply` and `restore:verify` with native `psql`/`pg_dump`/`pg_restore` 17+ against local PGlite over 127.0.0.1, both sides as the non-superuser migration role, into a new project that starts with pg_graphql and no ledger; `tests/scripts/backup.test.mjs` covers the manifest, the set-file and access checks, superseded-gate closing and the watch verdict; `tests/scripts/setup-doc.test.mjs` holds SETUP.md's order |
 
 Two mutation checks were run while building: weakening the owner check in `eden_private.is_member` fails six database tests; breaking the conflict mapping or the page size in the front end fails three screen tests.
+
+## Stage 1 code review fixes
+
+Each item has tests that failed before its fix.
+
+| Review item | Fix | Tests |
+| --- | --- | --- |
+| P0-1 open tab keeps the previous account's screen | Auth events compared with the rendered account; screen and caches cleared at once; late answers for the old account dropped | `tests/web/app.test.mjs` ("account change on an open tab") |
+| P0-2 RPC return columns unchecked | Inventory pins every operation's result fields; every operation called as owner and member with seeded money, keys checked at every depth | `tests/db/inventory.test.mjs`, `tests/db/money-guard.test.mjs` ("every published operation"). Mutations: a null `estimated_cents` on `get_project` fails 4; an estimate in the export's JSON fails 2 |
+| P0-3 GraphQL test started without GraphQL | The fixture starts like a hosted project, with a pg_graphql stand-in | `tests/db/inventory.test.mjs`. Omitting the drop fails 2 |
+| P0-4 private term printed from a file name | Paths holding a deny-listed term are withheld in every finding | `tests/scripts/public.test.mjs` |
+| P1-1, P1-2 restore and verification | `restore:apply`; set files, RLS, helper owner and grants verified | `tests/scripts/restore.test.mjs`, `tests/scripts/backup.test.mjs` |
+| P1-3, P1-4 setup order and the drill | SETUP.md rewritten: synthetic stage, drill, then real users | `tests/scripts/setup-doc.test.mjs` |
+| P1-5 to P1-9 screens | Thread refresh in place; failed-move message kept; one record per tap; phone board fetches one column; owner Edit/Archive project | `tests/web/views.test.mjs`, `tests/db/access.test.mjs` |
+| P1-10, P1-11 public guard range and unreadable files | Event SHAs in CI, outgoing refs in the hook; NUL-delimited entries; an uninspectable entry fails | `tests/scripts/public.test.mjs` |
+| P1-12 failed sign-out | Local sign-out fallback; no data shown from a surviving session | `tests/web/app.test.mjs` ("sign-out when the server cannot be reached") |
+
+The P2 note (assignee picker capped at 100 rows) is not fixed in this round.
 
 ## Open review items carried as tests
 
@@ -50,8 +68,11 @@ The spec's round-3 review left two blockers open. They are stage tests where the
 7. **Inventory scope.** The local inventory covers the Eden schemas and `public`. Supabase-owned schemas exist only on the hosted project; SETUP.md §6 checks the hosted exposure (anon, `Accept-Profile: eden`, GraphQL).
 8. **Verified TLS.** The operator scripts refuse a remote connection string without `sslmode=verify-full` and the Supabase CA certificate. The backup worker receives the (public) certificate as `EDEN_DB_CA_PEM` and verifies every connection.
 9. **Backup sets record their migrations and table list**, and `restore:verify` fails on a mismatch, so a Stage 2 restore missing a financial migration fails (review P1-5). Stage 1 sets hold no receipts. The image is built with Cloud Build (review P1-6), and the heartbeat has its own log-based metric for the absence alert (review P1-7).
-10. **CI workflow location.** The agent's GitHub token cannot push workflow files, so the workflow is at `docs/ci/github-actions-ci.yml` for Hank to move (SETUP.md §7).
+10. **CI workflow location.** The agent's GitHub token has no workflow scope, so the workflow is at `docs/ci/github-actions-ci.yml` for Hank to move (SETUP.md §7). It reviews the event's base..head and installs the PostgreSQL 17 client tools.
+11. **Dump rows as column-named INSERTs** (`--column-inserts`), in the worker and the local test alike: robust to column-order differences between Supabase versions, small at Eden's size, and restorable by PGlite, which cannot take `COPY FROM STDIN` over the wire.
+12. **Restore without owners, then hand the helper over.** `restore:apply` restores the Eden dump with `--no-owner` and repeats the migration's ownership transfer of `eden_private.is_member`, because a non-superuser cannot restore that owner directly (the new owner needs CREATE on the schema during the ALTER). The ledger is dumped with its table definition.
+13. **Synthetic stage before real users.** SETUP.md enrolls six test Google accounts first, runs the drill on that data, and enrolls the real people only after it passes (review P1-3).
 
 ## Not verified here
 
-Nothing hosted was created or run: no Supabase project, Netlify site, Google client or Cloud Run job. `pg_dump`, `age`, Cloud Storage uploads and the restore commands in SETUP.md §11 run for the first time in Hank's drill. In particular, restoring `auth` rows as Supabase's `postgres` role is unverified. The 375 px layout was not rendered in a real browser.
+Nothing hosted was created or run: no Supabase project, Netlify site, Google client or Cloud Run job. The dump and restore commands ran locally against PGlite (PostgreSQL 17) with libpq 18 client tools; on hosted Supabase they run for the first time in Hank's drill. In particular, writing `auth` rows as Supabase's `postgres` role is modelled locally by a grant, not verified. `age` and the Cloud Storage uploads are unverified. The 375 px layout was not rendered in a real browser; the phone tests set a 375 px viewport in happy-dom and check structure and request counts, not pixels.

@@ -14,7 +14,8 @@ Supabase Postgres (row-level security on every table; the Data API exposes only 
 
 ```sh
 npm ci
-npm test                      # database, screen and script tests (local Postgres 17 via PGlite; no Docker)
+npm test                      # database, screen and script tests (local Postgres 17 via PGlite; no Docker;
+                              # the restore test needs psql/pg_dump/pg_restore 17+, docs/SETUP.md §0)
 npm run dev                   # local app; needs .env.local (see .env.example)
 npm run build                 # build guard, then Vite
 npm run check:dist            # scan the build
@@ -22,6 +23,6 @@ npm run check:public          # before every push (needs EDEN_DENYLIST_FILE)
 npm run --silent inventory:print > tests/db/inventory.expected.mjs   # after a migration; review the diff
 ```
 
-Operator scripts (Hank only; they prompt for a connection string and never store it): `roster:pending`, `roster:apply`, `roster:show`, `access:open`, `access:close`, `restore:verify`.
+Operator scripts (Hank only; they prompt for a connection string and never store it): `roster:pending`, `roster:apply`, `roster:show`, `access:open`, `access:close`, `restore:apply`, `restore:verify`.
 
 This repository is public. Use synthetic data only.
