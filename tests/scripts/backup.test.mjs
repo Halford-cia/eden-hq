@@ -4,7 +4,14 @@
 // scheduled-backup and restore-drill acceptance runs (docs/SETUP.md).
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { freshDb, seedCast, asUser, rpc, MIGRATOR, setGate } from '../db/harness.mjs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import {
+  freshDb, seedCast, asUser, rpc, MIGRATOR, setGate, repoRoot,
+} from '../db/harness.mjs';
 import {
   setTimestamp, setObjectNames, snapshotFacts, buildManifest, verifyRestore, closeSuperseded,
   watchVerdict, statusRecord, edenRolesOnly,
@@ -81,22 +88,25 @@ describe('snapshot facts, manifest and restore:verify', () => {
   it('a matching restored copy with a closed gate passes; any drift fails by name', async () => {
     await db.query(`set role ${MIGRATOR}`);
     const facts = await snapshotFacts(db);
-    const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files: [] })));
     await db.query('reset role');
+    const { dir, files } = setFolder();
+    const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
 
     // A restored copy: same data, gate closed (the dump leaves its data out).
     await setGate(db, false);
     await db.query(`set role ${MIGRATOR}`);
-    const pass = await verifyRestore(db, manifest);
+    const pass = await verifyRestore(db, manifest, { dir });
+    expect(pass.checks.filter((c) => !c.ok)).toEqual([]);
     expect(pass.ok).toBe(true);
 
     const fewer = { ...manifest, tables: { ...manifest.tables, 'eden.tasks': 2 } };
-    const r1 = await verifyRestore(db, fewer);
+    const r1 = await verifyRestore(db, fewer, { dir });
     expect(r1.ok).toBe(false);
     expect(r1.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual(['row count eden.tasks']);
 
     const stage2 = { ...manifest, migrations: [...manifest.migrations, '20990101000000'], tables: { ...manifest.tables, 'eden.receipts': 0 } };
-    const r2 = await verifyRestore(db, stage2);
+    const r2 = await verifyRestore(db, stage2, { dir });
     expect(r2.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
       'applied migrations match the set', 'table list matches the set', 'row count eden.receipts',
     ]);
@@ -104,11 +114,113 @@ describe('snapshot facts, manifest and restore:verify', () => {
 
     await setGate(db, true);
     await db.query(`set role ${MIGRATOR}`);
-    const open = await verifyRestore(db, manifest);
+    const open = await verifyRestore(db, manifest, { dir });
     expect(open.checks.find((c) => c.name === 'access gate closed').ok).toBe(false);
     await db.query('reset role');
+    await setGate(db, false);
+  });
+
+  // Review P1-2: matching counts are not a recovery.
+  it('counts match but a required file is absent, truncated or altered: FAIL by name', async () => {
+    await db.query(`set role ${MIGRATOR}`);
+    const facts = await snapshotFacts(db);
+    await db.query('reset role');
+    const { dir, files } = setFolder();
+    const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+    await db.query(`set role ${MIGRATOR}`);
+    try {
+      expect((await verifyRestore(db, manifest, { dir })).ok).toBe(true);
+
+      rmSync(join(dir, 'eden.dump'));
+      writeFileSync(join(dir, 'auth.dump'), 'SYNTHETIC altered');
+      const r = await verifyRestore(db, manifest, { dir });
+      expect(r.ok).toBe(false);
+      expect(r.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
+        'set file auth.dump matches its recorded size and hash',
+        'set file eden.dump is present',
+      ]);
+
+      // A manifest that leaves a required file out fails too.
+      const short = { ...manifest, files: manifest.files.filter((f) => f.name !== 'roles.sql') };
+      const r2 = await verifyRestore(db, short, { dir });
+      expect(r2.checks.filter((c) => !c.ok).map((c) => c.name)).toContain('the set lists required file roles.sql');
+
+      // And no folder at all is not a pass.
+      const r3 = await verifyRestore(db, manifest);
+      expect(r3.ok).toBe(false);
+    } finally {
+      await db.query('reset role');
+    }
+  });
+
+  it('restored RLS, helper ownership and grants are compared with the set', async () => {
+    await db.query(`set role ${MIGRATOR}`);
+    const facts = await snapshotFacts(db);
+    await db.query('reset role');
+    expect(facts.access.definers).toEqual([
+      { schema: 'eden_private', name: 'is_member', owner: 'eden_membership_reader', config: 'search_path=""' },
+    ]);
+    const { dir, files } = setFolder();
+    const manifest = JSON.parse(JSON.stringify(buildManifest({ stage: 1, facts, files })));
+
+    const copy = await freshDb();
+    await seedLike(copy);
+    await setGate(copy, false);
+    // The helper left owned by the operator, as the reviewed restore did.
+    await copy.exec('alter function eden_private.is_member(uuid, boolean) owner to postgres');
+    await copy.exec('alter table eden.tasks disable row level security');
+    await copy.query(`set role ${MIGRATOR}`);
+    const r = await verifyRestore(copy, { ...manifest, tables: (await snapshotFacts(copy)).tables, auth: (await snapshotFacts(copy)).auth }, { dir });
+    await copy.query('reset role');
+    const failed = r.checks.filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toContain('row-level security on every Eden table');
+    expect(failed).toContain('membership helper owned by eden_membership_reader, the only definer function');
+    expect(failed).toContain('restored ownership, grants and policies match the set');
+  });
+
+  it('restore:verify (the real script) refuses a folder holding only a manifest, before asking for a connection', async () => {
+    await db.query(`set role ${MIGRATOR}`);
+    const facts = await snapshotFacts(db);
+    await db.query('reset role');
+    const d = mkdtempSync(join(tmpdir(), 'eden-set-'));
+    const manifest = buildManifest({
+      stage: 1,
+      facts,
+      files: [
+        { name: 'eden.dump', bytes: 10, sha256: 'a'.repeat(64) },
+        { name: 'auth.dump', bytes: 10, sha256: 'b'.repeat(64) },
+      ],
+    });
+    writeFileSync(join(d, 'manifest.json'), JSON.stringify(manifest));
+    const res = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'restore-verify.mjs'), d],
+      { input: 'postgresql://unused@127.0.0.1:1/none\n', encoding: 'utf8' });
+    const out = `${res.stdout}${res.stderr}`;
+    expect(out).toContain('FAIL  set file eden.dump is present');
+    expect(out).toContain('restore:verify FAILED');
+    expect(out).not.toContain('PASSED');
+    expect(res.status).toBe(1);
   });
 });
+
+// A decrypted set folder holding the four Stage 1 files (SYNTHETIC bytes).
+function setFolder() {
+  const dir = mkdtempSync(join(tmpdir(), 'eden-set-'));
+  const files = [];
+  for (const name of ['roles.sql', 'eden.dump', 'auth.dump', 'migrations.dump']) {
+    const buf = Buffer.from(`SYNTHETIC ${name}\n`);
+    writeFileSync(join(dir, name), buf);
+    files.push({ name, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex') });
+  }
+  return { dir, files };
+}
+
+async function seedLike(copy) {
+  const c = await seedCast(copy);
+  const [p] = await asUser(copy, c.owner.id, (tx) =>
+    rpc(tx, 'create_project', { p_workspace_id: c.ws.home_building, p_name: 'SYNTHETIC Backup build' }));
+  await asUser(copy, c.owner.id, (tx) =>
+    rpc(tx, 'create_task', { p_project_id: p.id, p_kind: 'task', p_title: 'SYNTHETIC One' }));
+}
 
 describe('superseded projects', () => {
   it('closes an open former gate, reports a closed one, and survives an unreachable one', async () => {

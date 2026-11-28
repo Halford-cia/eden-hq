@@ -22,6 +22,7 @@
     "roster:show": "node scripts/roster.mjs show",
     "access:open": "node scripts/access.mjs open",
     "access:close": "node scripts/access.mjs close",
+    "restore:apply": "node scripts/restore-apply.mjs",
     "restore:verify": "node scripts/restore-verify.mjs",
     "inventory:print": "node scripts/inventory-print.mjs"
   },
@@ -31,6 +32,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.3.16",
+    "@electric-sql/pglite-socket": "0.0.22",
     "happy-dom": "21.0.4",
     "vite": "8.4.0",
     "vitest": "5.1.2"

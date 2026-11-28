@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import pg from 'pg';
 import {
-  setTimestamp, setObjectNames, snapshotFacts, buildManifest, edenRolesOnly, statusRecord, closeSuperseded,
+  setTimestamp, setObjectNames, snapshotFacts, buildManifest, edenRolesOnly, statusRecord, closeSuperseded, dumpCommands,
 } from './lib.mjs';
 import { uploadObject, readObject } from './gcs.mjs';
 
@@ -119,27 +119,11 @@ async function main() {
       await db.query('begin isolation level repeatable read read only');
       const { rows: [{ snap }] } = await db.query('select pg_export_snapshot() as snap');
       facts = await snapshotFacts(db);
-      // Owners and grants stay in the dump: the membership helper must come
-      // back owned by eden_membership_reader (docs/SETUP.md, restore drill).
-      const dumpArgs = ['--dbname', dbUrl, '--snapshot', snap, '--format', 'custom'];
-      const schemaAndData = await run('pg_dump', [
-        ...dumpArgs, '--schema', 'eden', '--schema', 'eden_private', '--schema', 'eden_api',
-        '--exclude-table-data', 'eden_private.access_gate',
-      ]);
-      const authData = await run('pg_dump', [
-        ...dumpArgs, '--data-only', '--table', 'auth.users', '--table', 'auth.identities',
-      ]);
-      const migrations = await run('pg_dump', [
-        ...dumpArgs, '--data-only', '--table', 'supabase_migrations.schema_migrations',
-      ]);
-      // pg_dumpall takes no --snapshot; roles change only with migrations.
-      const roles = Buffer.from(edenRolesOnly(
-        (await run('pg_dumpall', ['--dbname', dbUrl, '--roles-only', '--no-role-passwords'])).toString('utf8'),
-      ));
-      for (const [name, buf] of [
-        ['roles.sql', roles], ['eden.dump', schemaAndData], ['auth.dump', authData], ['migrations.dump', migrations],
-      ]) {
-        files.push({ name, buf, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex') });
+      // The same commands the local clean-restore test runs (dumpCommands).
+      for (const step of dumpCommands({ dbUrl, snapshot: snap })) {
+        let buf = await run(step.cmd, step.args);
+        if (step.name === 'roles.sql') buf = Buffer.from(edenRolesOnly(buf.toString('utf8')));
+        files.push({ name: step.name, buf, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex') });
       }
       await db.query('commit');
     } finally {

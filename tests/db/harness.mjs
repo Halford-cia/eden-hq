@@ -108,7 +108,15 @@ export async function emptyProject() {
 // is installed by the migration role (review P0-3: the removal test must
 // start with the extension present).
 async function installGraphqlStandIn(db) {
-  const share = (await db.query(`select setting from pg_config where name = 'SHAREDIR'`)).rows[0].setting;
+  await writeGraphqlFiles(db, await shareDir(db));
+  await db.exec(`set role ${MIGRATOR}; create extension pg_graphql; reset role;`);
+}
+
+async function shareDir(db) {
+  return (await db.query(`select setting from pg_config where name = 'SHAREDIR'`)).rows[0].setting;
+}
+
+async function writeGraphqlFiles(db, share) {
   const FS = db.mod.FS;
   FS.writeFile(`${share}/extension/pg_graphql.control`, [
     "comment = 'SYNTHETIC stand-in for Supabase pg_graphql'",
@@ -122,7 +130,20 @@ async function installGraphqlStandIn(db) {
     "create function graphql.resolve(query text) returns jsonb language sql stable as $$ select '{}'::jsonb $$;\n"
     + 'grant usage on schema graphql to anon, authenticated, service_role;\n'
     + 'grant execute on function graphql.resolve(text) to anon, authenticated, service_role;\n');
-  await db.exec(`set role ${MIGRATOR}; create extension pg_graphql; reset role;`);
+}
+
+/**
+ * The same database reopened with `username` as the session user, so every
+ * client (psql, pg_dump, pg_restore through a local socket) acts as that role.
+ * Used to run the native tools as Supabase's non-superuser postgres.
+ */
+export async function reopenAs(db, username) {
+  const share = await shareDir(db);
+  const dataDir = await db.dumpDataDir('none');
+  await db.close();
+  const next = await PGlite.create({ loadDataDir: dataDir, username, parsers: { 1082: (v) => v } });
+  await writeGraphqlFiles(next, share);
+  return next;
 }
 
 /** Fresh database with every migration applied, as Supabase's postgres would. */
